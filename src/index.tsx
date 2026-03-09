@@ -11,7 +11,7 @@ import {
 } from "@decky/ui";
 import { FaShip } from "react-icons/fa";
 import React, { VFC, useState, useEffect } from "react";
-import { routerHook } from "@decky/api";
+import { routerHook, toaster } from "@decky/api";
 
 import { StateBoolean } from "./state";
 import { useUIComposition, UIComposition } from "./uiComposition";
@@ -171,9 +171,21 @@ const Content: VFC<{
             <PanelSectionRow>
                 <DialogButton onClick={() => {
                     // mostly just making sure the bridge is alive
-                    call("get_visual_offset", {})
-                        .then((res: any) => console.log("[MuteMotion] Brain pulse check:", res))
-                        .catch((err: any) => console.error("[MuteMotion] Brain is fried:", err));
+                    call("ping_engine", {})
+                        .then((res: any) => {
+                            console.log("[MuteMotion] Ping success:", res);
+                            toaster.toast({
+                                title: "MuteMotion Core",
+                                body: res?.message || "Engine is Online"
+                            });
+                        })
+                        .catch((err: any) => {
+                            console.error("[MuteMotion] Ping failed:", err);
+                            toaster.toast({
+                                title: "MuteMotion Core Error",
+                                body: "Engine is Offline (Safe Mode)"
+                            });
+                        });
                 }}>
                     Test Engine Ping
                 </DialogButton>

@@ -16,9 +16,10 @@ export const DebugHUD: VFC = () => {
                 // tell the python daemon to cough up the numbers
                 const resp: any = await call("get_visual_offset", {});
                 
-                // -99.9 is the safe mode sentinel value if the C++ brain dies
-                if (resp && resp.success && resp.result && resp.result.offset !== -99.9) {
-                    setTelemetry(resp.result);
+                // decky v3 returns the dict directly, no .success/.result wrapper
+                // -88.8 is the error sentinel from the python exception handler
+                if (resp && resp.offset !== undefined && resp.offset !== -88.8) {
+                    setTelemetry(resp);
                 }
             } catch (e) {
                 console.error("[MuteMotion] HUD telemetry poll failed:", e);
@@ -39,25 +40,26 @@ export const DebugHUD: VFC = () => {
     return (
         <div style={{
             position: "absolute",
-            top: "20px",
-            left: "20px",
-            color: "#00ffcc",
+            bottom: "40px",
+            left: "40px",
+            color: "#00ff00",
             fontFamily: "monospace",
-            fontSize: "12px",
-            backgroundColor: "rgba(0,0,0,0.7)",
-            padding: "10px",
-            borderRadius: "5px",
+            fontSize: "14px",
+            backgroundColor: "rgba(0,0,0,0.85)",
+            padding: "15px",
+            borderRadius: "8px",
             pointerEvents: "none",
-            zIndex: 9999
+            zIndex: 9999,
+            whiteSpace: "pre-line"
         }}>
-            <div style={{ marginBottom: "5px", fontWeight: "bold" }}>RAW: SYSTEM ONLINE</div>
-            <div>Offset: {telemetry.offset.toFixed(4)}</div>
-            <div>AX: {telemetry.ax.toFixed(4)}g</div>
-            <div>AY: {telemetry.ay.toFixed(4)}g</div>
-            <div>AZ: {telemetry.az.toFixed(4)}g</div>
-            <div>RX (Gyro X): {telemetry.rx.toFixed(2)} dps</div>
-            <div>RY (Gyro Y): {telemetry.ry.toFixed(2)} dps</div>
-            <div>RZ (Gyro Z): {telemetry.rz.toFixed(2)} dps</div>
+            <div style={{ marginBottom: "5px", fontWeight: "bold", borderBottom: "1px solid #00ff00", paddingBottom: "5px" }}>RAW: SYSTEM ONLINE</div>
+            <div>Offset:  {telemetry.offset.toFixed(4)}</div>
+            <div>Accel X: {telemetry.ax.toFixed(4)}g</div>
+            <div>Accel Y: {telemetry.ay.toFixed(4)}g</div>
+            <div>Accel Z: {telemetry.az.toFixed(4)}g</div>
+            <div>Gyro X:  {telemetry.rx.toFixed(2)} dps</div>
+            <div>Gyro Y:  {telemetry.ry.toFixed(2)} dps</div>
+            <div>Gyro Z:  {telemetry.rz.toFixed(2)} dps</div>
         </div>
     );
 };

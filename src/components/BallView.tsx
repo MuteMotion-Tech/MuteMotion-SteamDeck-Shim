@@ -2,7 +2,7 @@ import React, { VFC, useState, useEffect, useRef } from "react";
 import { call } from "@decky/api";
 import { TelemetryData } from "../types";
 
-// the 2D tracking dot (Incident 035 fix)
+// the 2D tracking dot - no border box, just the dot and crosshair
 export const BallView: VFC = () => {
     const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
     const frameRef = useRef<number>();
@@ -17,9 +17,10 @@ export const BallView: VFC = () => {
                 // tell the python daemon to cough up the numbers
                 const resp: any = await call("get_visual_offset", {});
                 
-                // -99.9 is the safe mode sentinel value if the C++ brain dies
-                if (resp && resp.success && resp.result && resp.result.offset !== -99.9) {
-                    setTelemetry(resp.result);
+                // decky v3 returns the dict directly, no .success/.result wrapper
+                // -88.8 is the error sentinel from the python exception handler
+                if (resp && resp.offset !== undefined && resp.offset !== -88.8) {
+                    setTelemetry(resp);
                 }
             } catch (e) {
                 console.error("[MuteMotion] Ball telemetry poll failed (skill issue):", e);
@@ -36,8 +37,7 @@ export const BallView: VFC = () => {
         };
     }, []);
 
-    // deadzone/clamp constraints so the ball doesnt leave the screen
-    // we scale it by a fixed amount so it feels right (trial and error mostly)
+    // clamp so the dot stays visible, no giant boundary box needed
     const xPos = telemetry ? Math.max(-400, Math.min(400, telemetry.offset_x * 8)) : 0;
     const yPos = telemetry ? Math.max(-250, Math.min(250, telemetry.offset_y * 8)) : 0;
 
@@ -50,17 +50,7 @@ export const BallView: VFC = () => {
             alignItems: "center",
             justifyContent: "center"
         }}>
-            {/* The Box */}
-            <div style={{
-                position: "absolute",
-                width: "800px",
-                height: "500px",
-                border: "2px solid rgba(255,255,255,0.1)",
-                borderRadius: "20px",
-                pointerEvents: "none",
-            }}></div>
-            
-            {/* The Crosshair */}
+            {/* just the crosshair, no border box - cleaner look */}
             <div style={{
                 position: "absolute",
                 width: "20px",
@@ -82,7 +72,7 @@ export const BallView: VFC = () => {
                 borderRadius: "50%",
                 boxShadow: "0 0 15px 5px rgba(0, 255, 204, 0.4)",
                 willChange: "transform",
-                // NFR-1.2 cubic-bezier smoothing - incident 035 fix
+                // smooth cubic-bezier so it dont jitter
                 transition: "transform 100ms cubic-bezier(0.4, 0, 0.2, 1)",
                 transform: `translate3d(${xPos}px, ${yPos}px, 0)`,
             }}></div>
