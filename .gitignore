@@ -18,3 +18,4 @@ fix_git_identity.sh
 RECOVERY_NOTE.md
 DEV_NOTE.md
 py_modules/libmutemotion_core.so
+build_payload/
