@@ -173,7 +173,7 @@ class Plugin:
     # the frontend calls these via call("function_name")
     # they return python dicts that become JS objects
 
-    async def get_visual_offset(self, **kwargs):
+    async def get_visual_offset(self, *args, **kwargs):
         """
         the main data endpoint - frontend polls this at ~60fps
         returns everything the overlay needs to render
@@ -192,8 +192,8 @@ class Plugin:
             # separate axes for 2D ball mode
             # accel_x = lateral (side-to-side tilt)
             # accel_z = forward/backward tilt (hardware Y after axis swap)
-            ox = float(self.accel_x) * 30.0   # lateral
-            oy = float(self.accel_z) * 40.0   # forward/back
+            ox = float(self.accel_x) * -30.0  # inverted so tilt left = ball goes left
+            oy = float(self.accel_z) * 40.0   # forward/back (this one was already correct)
 
             return {
                 "offset": float(offset),
@@ -213,6 +213,14 @@ class Plugin:
                 "rx": -88.8, "ry": -88.8, "rz": -88.8,
                 "ax": -88.8, "ay": -88.8, "az": -88.8
             }
+
+    async def ping_engine(self, *args, **kwargs):
+        """test endpoint to verify RPC bridge is alive - now with toast notifications"""
+        decky_plugin.logger.info("MuteMotion Engine Ping Received!")
+        if core_engine:
+            return {"status": "online", "message": "Core is Active"}
+        else:
+            return {"status": "fallback", "message": "Core is Offline (Safe Mode)"}
 
     async def _main(self):
         """plugin startup - load everything and start the sensor thread"""
