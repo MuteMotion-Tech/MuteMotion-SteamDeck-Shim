@@ -57,51 +57,65 @@ class Plugin:
 
     def _hardware_reader_loop(self):
         """
-        multiplexed hidraw polling loop
+        multiplexed hidraw polling loop with watchdog recovery
         opens ALL neptune endpoints and listens on all of them simultaneously
         using select() bc epoll is overkill and this isnt a kernel driver
         
         anti-zero-lock: skips endpoints sending all zeros (dead/inactive)
         auto-locks onto whichever endpoint has actual IMU data
+        
+        WATCHDOG: if no data arrives for 2 seconds, assumes steam/gamescope
+        stole the device. closes everything and re-scans hidraw endpoints.
+        this is the gamescope bypass - we just keep trying until steam lets go.
         """
-        decky_plugin.logger.info("starting multiplexed hidraw polling...")
+        decky_plugin.logger.info("starting multiplexed hidraw polling w/ watchdog...")
         import select
 
-        # wait for neptune to show up (might not be ready on boot)
-        hidraw_paths = []
-        while self._running:
+        WATCHDOG_TIMEOUT = 2.0  # seconds of silence before we re-scan
+        RESCAN_COOLDOWN = 1.0   # dont spam re-scans, chill between attempts
+
+        def open_neptune_fds():
+            """find and open all neptune hidraw endpoints, returns list of fds"""
             hidraw_paths = self._find_hidraw_devices()
-            if hidraw_paths:
-                decky_plugin.logger.info(f"neptune found: {hidraw_paths}")
-                break
-            time.sleep(2)  # chill and try again
+            opened = []
+            for path in hidraw_paths:
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                    opened.append(fd)
+                    decky_plugin.logger.info(f"opened {path} (fd={fd})")
+                except Exception as e:
+                    decky_plugin.logger.error(f"cant open {path}: {e}")
+            return opened
+
+        # initial device scan - wait for neptune to show up on boot
+        fds = []
+        while self._running and not fds:
+            fds = open_neptune_fds()
+            if not fds:
+                decky_plugin.logger.info("waiting for neptune to show up...")
+                time.sleep(2)
 
         if not self._running:
             return
 
-        # open all endpoints in non-blocking mode
-        fds = []
-        for path in hidraw_paths:
-            try:
-                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-                fds.append(fd)
-                decky_plugin.logger.info(f"opened {path} (fd={fd})")
-            except Exception as e:
-                decky_plugin.logger.error(f"cant open {path}: {e}")
-
-        if not fds:
-            decky_plugin.logger.error("no hidraw endpoints opened. sensor data unavailable.")
-            return
-
         tick_counter = 0
         imu_active_endpoint = None
+        last_data_time = time.time()  # watchdog timer
 
         while self._running:
             try:
-                # poll all fds at once - whoever has data, we read it
-                readable, _, _ = select.select(fds, [], [], 1.0)
+                # poll all fds at once - 50ms timeout so watchdog can fire quickly
+                readable, _, _ = select.select(fds, [], [], 0.05)
+                
                 for r_fd in readable:
-                    data = os.read(r_fd, 64)
+                    try:
+                        data = os.read(r_fd, 64)
+                    except BlockingIOError:
+                        continue  # nonblocking, nothing available, skip
+                    except OSError:
+                        # fd went bad (steam stole it probably)
+                        continue
+
                     if len(data) == 64:
                         # grab the IMU payload (bytes 24-36, 6x int16_t)
                         raw_imu = data[24:36]
@@ -110,6 +124,9 @@ class Plugin:
                         # some hidraw endpoints send all zeros, useless
                         if raw_imu == b'\x00' * 12:
                             continue
+
+                        # WE GOT DATA - reset watchdog
+                        last_data_time = time.time()
 
                         # lock onto the endpoint thats actually sending IMU data
                         if imu_active_endpoint != r_fd:
@@ -155,8 +172,32 @@ class Plugin:
                             forward = self.accel_y * 40.0
                             self.last_offset = lateral + forward
 
-            except BlockingIOError:
-                pass  # non-blocking read, nothing available, thats fine
+                # === WATCHDOG: detect steam/gamescope stealing our device ===
+                if time.time() - last_data_time > WATCHDOG_TIMEOUT:
+                    decky_plugin.logger.info("[WATCHDOG] no data for 2s, re-scanning hidraw devices...")
+                    
+                    # close all stale fds
+                    for fd in fds:
+                        try:
+                            os.close(fd)
+                        except:
+                            pass
+                    
+                    # cooldown so we dont hammer the filesystem
+                    time.sleep(RESCAN_COOLDOWN)
+                    
+                    # re-open fresh
+                    fds = open_neptune_fds()
+                    imu_active_endpoint = None
+                    
+                    if fds:
+                        last_data_time = time.time()  # reset watchdog
+                        decky_plugin.logger.info(f"[WATCHDOG] re-acquired {len(fds)} endpoints, resuming...")
+                    else:
+                        decky_plugin.logger.error("[WATCHDOG] neptune disappeared, will retry in 2s...")
+                        time.sleep(2)
+                        last_data_time = time.time()  # prevent watchdog spam
+
             except Exception as e:
                 import traceback
                 decky_plugin.logger.error(f"hidraw error: {traceback.format_exc()}")
