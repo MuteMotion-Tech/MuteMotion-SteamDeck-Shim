@@ -33,6 +33,11 @@ class Plugin:
         self.accel_y = 0.0
         self.accel_z = 0.0
         self.last_offset = 0.0
+        # watchdog diagnostics (exposed via get_watchdog_status RPC)
+        self._last_data_timestamp = 0.0
+        self._watchdog_fires = 0
+        self._active_fd_count = 0
+        self._reader_alive = False
 
     def _find_hidraw_devices(self):
         """scan /sys/class/hidraw/ for neptune controller endpoints (28DE:1205)"""
@@ -101,6 +106,7 @@ class Plugin:
         tick_counter = 0
         imu_active_endpoint = None
         last_data_time = time.time()  # watchdog timer
+        self._reader_alive = True
 
         while self._running:
             try:
@@ -127,6 +133,8 @@ class Plugin:
 
                         # WE GOT DATA - reset watchdog
                         last_data_time = time.time()
+                        self._last_data_timestamp = last_data_time
+                        self._active_fd_count = len(fds)
 
                         # lock onto the endpoint thats actually sending IMU data
                         if imu_active_endpoint != r_fd:
@@ -174,7 +182,8 @@ class Plugin:
 
                 # === WATCHDOG: detect steam/gamescope stealing our device ===
                 if time.time() - last_data_time > WATCHDOG_TIMEOUT:
-                    decky_plugin.logger.info("[WATCHDOG] no data for 2s, re-scanning hidraw devices...")
+                    self._watchdog_fires += 1
+                    decky_plugin.logger.info(f"[WATCHDOG] fire #{self._watchdog_fires}, re-scanning hidraw devices...")
                     
                     # close all stale fds
                     for fd in fds:
@@ -190,6 +199,7 @@ class Plugin:
                     fds = open_neptune_fds()
                     imu_active_endpoint = None
                     
+                    self._active_fd_count = len(fds)
                     if fds:
                         last_data_time = time.time()  # reset watchdog
                         decky_plugin.logger.info(f"[WATCHDOG] re-acquired {len(fds)} endpoints, resuming...")
@@ -262,6 +272,18 @@ class Plugin:
             return {"status": "online", "message": "Core is Active"}
         else:
             return {"status": "fallback", "message": "Core is Offline (Safe Mode)"}
+
+    async def get_watchdog_status(self, *args, **kwargs):
+        """diagnostics endpoint - shows sensor thread health in the QAM"""
+        now = time.time()
+        data_age = now - self._last_data_timestamp if self._last_data_timestamp > 0 else -1
+        return {
+            "thread_alive": self._reader_alive,
+            "data_age_seconds": round(data_age, 2),
+            "watchdog_fires": self._watchdog_fires,
+            "active_fds": self._active_fd_count,
+            "last_timestamp": round(self._last_data_timestamp, 2),
+        }
 
     async def _main(self):
         """plugin startup - load everything and start the sensor thread"""

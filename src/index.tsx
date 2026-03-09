@@ -104,6 +104,42 @@ const Overlay: VFC<{
     );
 });
 
+// live diagnostics panel that polls the python backend's watchdog state
+const WatchdogStatus: VFC = () => {
+    const [status, setStatus] = useState<any>(null);
+
+    useEffect(() => {
+        const poll = setInterval(() => {
+            call("get_watchdog_status", {})
+                .then((res: any) => { if (res) setStatus(res); })
+                .catch(() => {});
+        }, 2000);
+        // immediate first fetch
+        call("get_watchdog_status", {})
+            .then((res: any) => { if (res) setStatus(res); })
+            .catch(() => {});
+        return () => clearInterval(poll);
+    }, []);
+
+    if (!status) return <div style={{ fontSize: "12px", color: "#888" }}>loading...</div>;
+
+    const fresh = status.data_age_seconds < 1.0;
+    return (
+        <div style={{ fontSize: "12px", fontFamily: "monospace", color: "#ccc", padding: "4px 0" }}>
+            <div>Thread: <span style={{ color: status.thread_alive ? "#0f0" : "#f00" }}>
+                {status.thread_alive ? "ALIVE" : "DEAD"}
+            </span></div>
+            <div>Data Age: <span style={{ color: fresh ? "#0f0" : "#ff0" }}>
+                {status.data_age_seconds}s
+            </span></div>
+            <div>Active FDs: {status.active_fds}</div>
+            <div>Watchdog Fires: <span style={{ color: status.watchdog_fires > 0 ? "#ff0" : "#0f0" }}>
+                {status.watchdog_fires}
+            </span></div>
+        </div>
+    );
+};
+
 const Content: VFC<{ 
     enabledState: StateBoolean,
     ballModeState: StateBoolean,
@@ -130,6 +166,7 @@ const Content: VFC<{
     }, [enabledState, ballModeState, debugModeState]);
 
     return (
+        <>
         <PanelSection title="Mitigation Engine">
             <PanelSectionRow>
                 <ToggleField
@@ -191,6 +228,11 @@ const Content: VFC<{
                 </DialogButton>
             </PanelSectionRow>
         </PanelSection>
+
+        <PanelSection title="Sensor Thread Diagnostics">
+            <WatchdogStatus />
+        </PanelSection>
+        </>
     );
 });
 
