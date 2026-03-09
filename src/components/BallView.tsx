@@ -7,7 +7,7 @@ export const BallView: VFC = () => {
     const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
     const frameRef = useRef<number>();
     
-    // polling loop - ~60fps (16ms)
+    // polling loop - ~60-90fps (16ms to 11ms depending on OLED/LCD)
     useEffect(() => {
         let isMounted = true;
         
