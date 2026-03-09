@@ -1,37 +1,33 @@
-import React, { VFC, useState, useEffect, useRef } from "react";
+import React, { VFC, useState, useEffect } from "react";
 import { call } from "@decky/api";
 import { TelemetryData } from "../types";
 
+// debug overlay - uses setInterval so gamescope cant freeze our polling
 export const DebugHUD: VFC = () => {
     const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
-    const frameRef = useRef<number>();
     
-    // polling loop - ~60-90fps (16ms to 11ms depending on OLED/LCD)
     useEffect(() => {
         let isMounted = true;
         
         const pollData = async () => {
             if (!isMounted) return;
             try {
-                // tell the python daemon to cough up the numbers
                 const resp: any = await call("get_visual_offset", {});
-                
-                // decky v3 returns the dict directly, no .success/.result wrapper
-                // -88.8 is the error sentinel from the python exception handler
                 if (resp && resp.offset !== undefined && resp.offset !== -88.8) {
                     setTelemetry(resp);
                 }
             } catch (e) {
-                console.error("[MuteMotion] HUD telemetry poll failed:", e);
+                // rpc died, try next tick
             }
-            frameRef.current = requestAnimationFrame(pollData);
         };
 
-        frameRef.current = requestAnimationFrame(pollData);
+        // setInterval survives gamescope render suspension
+        const interval = setInterval(pollData, 16); // ~60fps
+        pollData();
 
         return () => {
             isMounted = false;
-            if (frameRef.current) cancelAnimationFrame(frameRef.current);
+            clearInterval(interval);
         };
     }, []);
 

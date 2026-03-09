@@ -1,32 +1,26 @@
-import React, { VFC, useState, useEffect, useRef } from "react";
+import React, { VFC, useState, useEffect } from "react";
 
-// static sine wave test - proves the bar CAN move without needing sensor data
-// if this works on deck, the rendering pipeline is valid and we just need to wire real data
+// static sine wave test - uses setInterval instead of rAF so gamescope cant pause it
+// if this animates during gameplay (QAM closed), the render persistence fix works
 export const HorizonBar: VFC = () => {
     const [tick, setTick] = useState(0);
-    const frameRef = useRef<number>();
 
-    // animation loop - oscillates the bar back and forth like a pendulum
-    // no RPC, no python, no C++, just pure vibes and math
     useEffect(() => {
         let isMounted = true;
         
-        const animate = () => {
+        // setInterval keeps ticking even when gamescope hides the overlay
+        // requestAnimationFrame gets paused - thats the whole gamescope freeze bug
+        const interval = setInterval(() => {
             if (!isMounted) return;
             setTick(t => t + 1);
-            frameRef.current = requestAnimationFrame(animate);
-        };
-
-        frameRef.current = requestAnimationFrame(animate);
+        }, 16); // ~60fps
 
         return () => {
             isMounted = false;
-            if (frameRef.current) cancelAnimationFrame(frameRef.current);
+            clearInterval(interval);
         };
     }, []);
 
-    // sine wave goes from -1 to 1, we scale it to ±30 for offset and ±240 for Y translation
-    // speed is controlled by the divisor (60 = ~1 full cycle per second at 60fps)
     const rawOffset = Math.sin(tick / 60) * 30;
     const yPos = Math.sin(tick / 60) * 240;
 
@@ -41,13 +35,12 @@ export const HorizonBar: VFC = () => {
         }}>
             <div style={{
                 width: "90%",
-                height: "4px", // thicc enough to see
+                height: "4px",
                 backgroundColor: "#ff0044",
                 boxShadow: "0 0 20px 5px rgba(255, 0, 68, 0.5)",
                 borderRadius: "2px",
                 willChange: "transform",
-                // no transition needed - requestAnimationFrame is already smooth
-                transform: `rotate(${rawOffset * 0.5}deg) translateY(${yPos}px)`, // the bar oscillates like its seasick
+                transform: `rotate(${rawOffset * 0.5}deg) translateY(${yPos}px)`,
             }}></div>
         </div>
     );
