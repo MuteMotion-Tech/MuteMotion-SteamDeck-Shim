@@ -1,0 +1,11 @@
+{
+    "name": "MuteMotion-Shim",
+    "author": "MuteMotion Team",
+    "flags": [
+        "root"
+    ],
+    "api_version": 2,
+    "version": "1.0.0",
+    "description": "MuteMotion Shim for Steam Deck",
+    "main": "dist/index.js"
+}

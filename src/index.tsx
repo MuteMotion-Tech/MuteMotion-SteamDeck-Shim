@@ -17,29 +17,35 @@ import { StateBoolean } from "./state";
 import { useUIComposition, UIComposition } from "./uiComposition";
 import { HorizonBar } from "./components/HorizonBar";
 import { BallView } from "./components/BallView";
+import { DebugHUD } from "./components/DebugHUD";
 
 const Overlay: VFC<{ 
     enabledState: StateBoolean, 
-    ballModeState: StateBoolean 
-}> = React.memo(({ enabledState, ballModeState }) => {
+    ballModeState: StateBoolean,
+    debugModeState: StateBoolean 
+}> = React.memo(({ enabledState, ballModeState, debugModeState }) => {
     const [visible, setVisible] = useState(enabledState.GetState());
     const [useBall, setUseBall] = useState(ballModeState.GetState());
+    const [useDebug, setUseDebug] = useState(debugModeState.GetState());
 
     // "ghost mode" - use notification layer because the footer kept stealing my inputs
-    useUIComposition(visible ? UIComposition.Notification : UIComposition.Hidden);
+    useUIComposition(visible || useDebug ? UIComposition.Notification : UIComposition.Hidden);
 
     useEffect(() => {
         const onEnabledChange = (val: boolean) => setVisible(val);
         const onModeChange = (val: boolean) => setUseBall(val);
+        const onDebugChange = (val: boolean) => setUseDebug(val);
         
         enabledState.onStateChanged(onEnabledChange);
         ballModeState.onStateChanged(onModeChange);
+        debugModeState.onStateChanged(onDebugChange);
         
         return () => {
             enabledState.offStateChanged(onEnabledChange);
             ballModeState.offStateChanged(onModeChange);
+            debugModeState.offStateChanged(onDebugChange);
         };
-    }, [enabledState, ballModeState]);
+    }, [enabledState, ballModeState, debugModeState]);
 
     // input isolation voodoo (click-through hack)
     useEffect(() => {
@@ -59,7 +65,7 @@ const Overlay: VFC<{
 
         const root = document.getElementById("root");
 
-        if (visible) {
+        if (visible || useDebug) {
             applyStyles(document.body);
             applyStyles(document.documentElement);
             if (root) applyStyles(root);
@@ -73,9 +79,9 @@ const Overlay: VFC<{
             resetStyles(document.documentElement);
             if (root) resetStyles(root);
         };
-    }, [visible]);
+    }, [visible, useDebug]);
 
-    if (!visible) return null;
+    if (!visible && !useDebug) return null;
 
     return (
         <div
@@ -92,30 +98,36 @@ const Overlay: VFC<{
                 backgroundColor: "transparent",
             }}
         >
-            {useBall ? <BallView /> : <HorizonBar />}
+            {visible && (useBall ? <BallView /> : <HorizonBar />)}
+            {useDebug && <DebugHUD />}
         </div>
     );
 });
 
 const Content: VFC<{ 
     enabledState: StateBoolean,
-    ballModeState: StateBoolean
-}> = React.memo(({ enabledState, ballModeState }) => {
+    ballModeState: StateBoolean,
+    debugModeState: StateBoolean
+}> = React.memo(({ enabledState, ballModeState, debugModeState }) => {
     const [isEnabled, setIsEnabled] = useState(enabledState.GetState());
     const [isBallMode, setIsBallMode] = useState(ballModeState.GetState());
+    const [isDebug, setIsDebug] = useState(debugModeState.GetState());
 
     useEffect(() => {
         const eHandler = (val: boolean) => setIsEnabled(val);
         const bHandler = (val: boolean) => setIsBallMode(val);
+        const dHandler = (val: boolean) => setIsDebug(val);
         
         enabledState.onStateChanged(eHandler);
         ballModeState.onStateChanged(bHandler);
+        debugModeState.onStateChanged(dHandler);
         
         return () => {
             enabledState.offStateChanged(eHandler);
             ballModeState.offStateChanged(bHandler);
+            debugModeState.offStateChanged(dHandler);
         };
-    }, [enabledState, ballModeState]);
+    }, [enabledState, ballModeState, debugModeState]);
 
     return (
         <PanelSection title="Mitigation Engine">
@@ -143,6 +155,18 @@ const Content: VFC<{
                     disabled={!isEnabled}
                 />
             </PanelSectionRow>
+
+            <PanelSectionRow>
+                <ToggleField
+                    label="Debug Monitor"
+                    description="Overlay RAW sensor data directly on screen"
+                    checked={isDebug}
+                    onChange={(val) => {
+                        setIsDebug(val);
+                        debugModeState.SetState(val);
+                    }}
+                />
+            </PanelSectionRow>
             
             <PanelSectionRow>
                 <DialogButton onClick={() => {
@@ -164,6 +188,7 @@ export default definePlugin(() => {
     // state nodes
     const enabledState = new StateBoolean(false); 
     const ballModeState = new StateBoolean(false);
+    const debugModeState = new StateBoolean(false);
 
     // Mount overlay function (incident 026b fix: routerhook re-registrations)
     // we make this a standalone function so we can re-mount if it dies
@@ -173,7 +198,7 @@ export default definePlugin(() => {
             // remove before add just in case there's an orphan overlay
             routerHook.removeGlobalComponent("MuteMotionOverlay");
             routerHook.addGlobalComponent("MuteMotionOverlay", () => (
-                <Overlay enabledState={enabledState} ballModeState={ballModeState} />
+                <Overlay enabledState={enabledState} ballModeState={ballModeState} debugModeState={debugModeState} />
             ));
             return true;
         } else {
@@ -186,9 +211,9 @@ export default definePlugin(() => {
     mountOverlay();
 
     return {
-        name: "MuteMotion",
+        name: "MuteMotion-Shim",
         title: <div className={staticClasses.Title}>MuteMotion</div>,
-        content: <Content enabledState={enabledState} ballModeState={ballModeState} />,
+        content: <Content enabledState={enabledState} ballModeState={ballModeState} debugModeState={debugModeState} />,
         icon: <FaShip />,
         onDismount() {
             console.log('[MuteMotion] Plugin dismounting, dropping hooks...');
