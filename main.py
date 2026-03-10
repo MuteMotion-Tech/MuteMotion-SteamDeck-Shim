@@ -9,6 +9,7 @@ import subprocess
 import socket
 import json
 import signal
+import fcntl
 
 # make py_modules importable
 plugin_dir = decky_plugin.DECKY_PLUGIN_DIR
@@ -98,7 +99,8 @@ class Plugin:
             opened = []
             for path in hidraw_paths:
                 try:
-                    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                    # Must be O_RDWR to allow HIDIOCSFEATURE IOCTL to write the wakeup command
+                    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
                     opened.append(fd)
                     decky_plugin.logger.info(f"opened {path} (fd={fd})")
                 except Exception as e:
@@ -116,6 +118,23 @@ class Plugin:
         if not self._running:
             return
 
+        # =========================================================
+        # Neptune Firmware Wake Command Payload (HIDIOCSFEATURE)
+        # =========================================================
+        # 0x87 = ID_SET_SETTINGS_VALUES
+        # 0x03 = length (reg + 2 byte value)
+        # 0x30 = SETTING_IMU_MODE (48)
+        # 0x1C = BIT(2)|BIT(3)|BIT(4) -> Send Gyro, Accel, Orientation
+        # 0x00 = High byte
+        # =========================================================
+        HIDIOCSFEATURE_65 = 0xC0414806
+        WAKE_REPORT = bytearray(65)
+        WAKE_REPORT[0] = 0x87
+        WAKE_REPORT[1] = 0x03
+        WAKE_REPORT[2] = 0x30
+        WAKE_REPORT[3] = 0x1C
+        WAKE_REPORT[4] = 0x00
+
         tick_counter = 0
         imu_active_endpoint = None
         last_data_time = time.time()  # watchdog timer
@@ -125,6 +144,15 @@ class Plugin:
             try:
                 # poll all fds at once - 50ms timeout so watchdog can fire quickly
                 readable, _, _ = select.select(fds, [], [], 0.05)
+                
+                if not readable:
+                    # Firmware is asleep because Steam Input put it in a low-power state.
+                    # Send active heartbeat to force sensors awake!
+                    for fd in fds:
+                        try:
+                            fcntl.ioctl(fd, HIDIOCSFEATURE_65, WAKE_REPORT)
+                        except Exception:
+                            pass
                 
                 for r_fd in readable:
                     try:
