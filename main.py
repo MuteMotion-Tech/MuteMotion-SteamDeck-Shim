@@ -42,6 +42,10 @@ class Plugin:
         self._watchdog_fires = 0
         self._active_fd_count = 0
         self._reader_alive = False
+        # sensor fusion states
+        self.pitch = 0.0
+        self.roll = 0.0
+        self.last_imu_time = 0.0
         # native overlay subprocess (gamescope bypass)
         self._overlay_process = None
         self._ipc_clients = []  # connected overlay renderers
@@ -171,23 +175,44 @@ class Plugin:
                         self.gyro_y = raw_gyro_z / 16.0        # swapped!
                         self.gyro_z = raw_gyro_y / 16.0        # swapped!
 
+                        # sensor fusion (Complementary Filter)
+                        current_time = time.time()
+                        if self.last_imu_time == 0:
+                            dt = 0.011  # ~90Hz default dt
+                        else:
+                            dt = current_time - self.last_imu_time
+                        self.last_imu_time = current_time
+
+                        # calculate accelerometer euler angles (degrees)
+                        # accel_x = lateral, accel_y = up/down swapped, accel_z = forward/back swapped
+                        try:
+                            # pitch is rotation forward/back (driven by accel_z acting against gravity on accel_y)
+                            accel_pitch = math.degrees(math.atan2(self.accel_z, math.sqrt(self.accel_x**2 + self.accel_y**2)))
+                            # roll is rotation side-to-side (driven by accel_x acting against gravity on accel_y/z)
+                            accel_roll = math.degrees(math.atan2(self.accel_x, math.sqrt(self.accel_y**2 + self.accel_z**2)))
+                        except Exception:
+                            accel_pitch = 0.0
+                            accel_roll = 0.0
+
+                        # fuse gyro and accel (Alpha = 0.98 favors gyro for short term, accel for long term drift correction)
+                        alpha = 0.98
+                        # Note: Gyro_x is lateral rotation (pitch velocity), Gyro_z is longitudinal rotation (roll velocity)
+                        self.pitch = alpha * (self.pitch + self.gyro_x * dt) + (1.0 - alpha) * accel_pitch
+                        self.roll = alpha * (self.roll + self.gyro_z * dt) + (1.0 - alpha) * accel_roll
+
                         tick_counter += 1
                         if tick_counter % 60 == 0:
                             decky_plugin.logger.info(
-                                f"[SENSOR] AX:{self.accel_x:.2f}g "
-                                f"AZ:{self.accel_z:.2f}g "
-                                f"GZ:{self.gyro_z:.1f}dps"
+                                f"[SENSOR] P:{self.pitch:.1f}° "
+                                f"R:{self.roll:.1f}° "
+                                f"dt:{dt:.3f}s"
                             )
 
                         # feed the brain
                         if core_engine:
                             gyro_tup = (self.gyro_x, self.gyro_y, self.gyro_z)
                             accel_tup = (self.accel_x, self.accel_y, self.accel_z)
-                            # the frontend uses separate axes for 2D ball mode
-                            # lateral (side-to-side tilt) + forward (vehicle accel/brake)
-                            lateral = self.accel_x * 30.0
-                            forward = self.accel_y * 40.0
-                            self.last_offset = lateral + forward
+                            self.last_offset = self.roll + self.pitch
 
                         # push IMU data to native overlay via IPC socket
                         self._push_ipc_data()
@@ -252,11 +277,10 @@ class Plugin:
 
         try:
             offset = getattr(self, 'last_offset', 0.0)
-            # separate axes for 2D ball mode
-            # accel_x = lateral (side-to-side tilt)
-            # accel_z = forward/backward tilt (hardware Y after axis swap)
-            ox = float(self.accel_x) * -30.0  # inverted so tilt left = ball goes left
-            oy = float(self.accel_z) * 40.0   # forward/back (this one was already correct)
+            # mapping true angles directly
+            ox = float(self.roll) * -1.0  # invert roll for native rendering
+            oy = float(self.pitch)
+
 
             return {
                 "offset": float(offset),
@@ -335,8 +359,9 @@ class Plugin:
             return
         
         # build the data packet
-        ox = float(self.accel_x) * -30.0
-        oy = float(self.accel_z) * 40.0
+        # Send true Euler angles to the overlay
+        ox = float(self.roll) * -1.0
+        oy = float(self.pitch)
         data = json.dumps({
             "offset_x": ox,
             "offset_y": oy,

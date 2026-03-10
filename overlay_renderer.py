@@ -162,11 +162,13 @@ class NativeOverlay:
             line_width=4
         )
         bar_w = int(sw * 0.9)
-        bar_y = sh // 2 + int(offset_y * 6)
+        # pitch (offset_y in degrees): 1 degree = 6 pixels of vertical movement
+        bar_y = sh // 2 + int(offset_y * 6.0)
         
         cx = sw // 2
         cy = bar_y
-        angle_rad = offset_x * 0.01
+        # roll (offset_x in degrees): convert exactly to radians for trigonometric line drawing
+        angle_rad = math.radians(offset_x)
         half_w = bar_w // 2
         
         x1 = int(cx - half_w * math.cos(angle_rad))
@@ -190,9 +192,9 @@ class NativeOverlay:
         self.window.line(self.gc, sw//2, sh//2 - 10, sw//2, sh//2 + 10)
         
         # Green ball
-        self.gc.change(foreground=self._hex_to_rgb(0x00FFCC))
-        bx = int(sw // 2 + max(-400, min(400, offset_x * 8)))
-        by = int(sh // 2 + max(-250, min(250, offset_y * 8)))
+        # offset_x/y are degrees. 45 degrees should map to edge of screen (roughly 600px / 400px)
+        bx = int(sw // 2 + max(-600, min(600, offset_x * 12.0)))
+        by = int(sh // 2 + max(-400, min(400, offset_y * 8.0)))
         self.window.fill_arc(self.gc, bx - 15, by - 15, 30, 30, 0, 360 * 64)
         
         self.display.flush()
