@@ -171,11 +171,22 @@ const Content: VFC<{
             <PanelSectionRow>
                 <ToggleField
                     label="Active Mitigation"
-                    description="Enable IMU-driven vestibular synchronization overlay"
+                    description="Spawn native overlay (GAMESCOPE_EXTERNAL_OVERLAY)"
                     checked={isEnabled}
                     onChange={(val) => {
                         setIsEnabled(val);
                         enabledState.SetState(val);
+                        if (val) {
+                            call("start_native_overlay", {}).then((res: any) => {
+                                toaster.toast({ title: "MuteMotion", body: res?.message || "Overlay Started" });
+                            }).catch(() => {
+                                toaster.toast({ title: "MuteMotion", body: "Failed to start overlay" });
+                            });
+                        } else {
+                            call("stop_native_overlay", {}).then(() => {
+                                toaster.toast({ title: "MuteMotion", body: "Overlay Stopped" });
+                            });
+                        }
                     }}
                 />
             </PanelSectionRow>
@@ -183,11 +194,12 @@ const Content: VFC<{
             <PanelSectionRow>
                 <ToggleField
                     label="2D Ball Mode"
-                    description="Use 2D dot tracking instead of full horizon bar"
+                    description="Switch native overlay to ball tracking mode"
                     checked={isBallMode}
                     onChange={(val) => {
                         setIsBallMode(val);
                         ballModeState.SetState(val);
+                        call("set_overlay_mode", val ? "ball" : "bar");
                     }}
                     disabled={!isEnabled}
                 />

@@ -5,6 +5,10 @@ import threading
 import struct
 import time
 import math
+import subprocess
+import socket
+import json
+import signal
 
 # make py_modules importable
 plugin_dir = decky_plugin.DECKY_PLUGIN_DIR
@@ -38,6 +42,11 @@ class Plugin:
         self._watchdog_fires = 0
         self._active_fd_count = 0
         self._reader_alive = False
+        # native overlay subprocess (gamescope bypass)
+        self._overlay_process = None
+        self._ipc_clients = []  # connected overlay renderers
+        self._ipc_server_sock = None
+        self._overlay_mode = "bar"  # "bar" or "ball"
 
     def _find_hidraw_devices(self):
         """scan /sys/class/hidraw/ for neptune controller endpoints (28DE:1205)"""
@@ -180,6 +189,9 @@ class Plugin:
                             forward = self.accel_y * 40.0
                             self.last_offset = lateral + forward
 
+                        # push IMU data to native overlay via IPC socket
+                        self._push_ipc_data()
+
                 # === WATCHDOG: detect steam/gamescope stealing our device ===
                 if time.time() - last_data_time > WATCHDOG_TIMEOUT:
                     self._watchdog_fires += 1
@@ -277,13 +289,138 @@ class Plugin:
         """diagnostics endpoint - shows sensor thread health in the QAM"""
         now = time.time()
         data_age = now - self._last_data_timestamp if self._last_data_timestamp > 0 else -1
+        overlay_alive = self._overlay_process is not None and self._overlay_process.poll() is None
         return {
             "thread_alive": self._reader_alive,
             "data_age_seconds": round(data_age, 2),
             "watchdog_fires": self._watchdog_fires,
             "active_fds": self._active_fd_count,
             "last_timestamp": round(self._last_data_timestamp, 2),
+            "overlay_alive": overlay_alive,
+            "ipc_clients": len(self._ipc_clients),
         }
+
+    def _start_ipc_server(self):
+        """start unix domain socket server for overlay IPC"""
+        sock_path = "/tmp/mutemotion.sock"
+        # cleanup stale socket
+        try:
+            os.unlink(sock_path)
+        except OSError:
+            pass
+        
+        self._ipc_server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._ipc_server_sock.bind(sock_path)
+        self._ipc_server_sock.listen(2)
+        self._ipc_server_sock.setblocking(False)
+        decky_plugin.logger.info(f"[IPC] socket server listening on {sock_path}")
+    
+    def _accept_ipc_clients(self):
+        """non-blocking accept of new overlay connections"""
+        if not self._ipc_server_sock:
+            return
+        try:
+            client, _ = self._ipc_server_sock.accept()
+            client.setblocking(False)
+            self._ipc_clients.append(client)
+            decky_plugin.logger.info(f"[IPC] overlay renderer connected ({len(self._ipc_clients)} clients)")
+        except BlockingIOError:
+            pass  # no new connections, thats fine
+    
+    def _push_ipc_data(self):
+        """push latest IMU data to all connected overlay renderers"""
+        self._accept_ipc_clients()  # check for new connections
+        
+        if not self._ipc_clients:
+            return
+        
+        # build the data packet
+        ox = float(self.accel_x) * -30.0
+        oy = float(self.accel_z) * 40.0
+        data = json.dumps({
+            "offset_x": ox,
+            "offset_y": oy,
+            "mode": self._overlay_mode,
+        }).encode() + b"\n"
+        
+        # send to all clients, remove dead ones
+        dead = []
+        for client in self._ipc_clients:
+            try:
+                client.sendall(data)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                dead.append(client)
+        
+        for d in dead:
+            try:
+                d.close()
+            except:
+                pass
+            self._ipc_clients.remove(d)
+    
+    async def start_native_overlay(self, *args, **kwargs):
+        """spawn the native overlay renderer subprocess"""
+        # kill existing if running
+        await self.stop_native_overlay()
+        
+        # start IPC server if not running
+        if not self._ipc_server_sock:
+            self._start_ipc_server()
+        
+        # find the overlay script
+        overlay_script = os.path.join(decky_plugin.DECKY_PLUGIN_DIR, "overlay_renderer.py")
+        if not os.path.exists(overlay_script):
+            decky_plugin.logger.error(f"[OVERLAY] script not found: {overlay_script}")
+            return {"status": "error", "message": "overlay_renderer.py not found"}
+        
+        # spawn as independent subprocess
+        # inherit DISPLAY so it can connect to xwayland
+        env = os.environ.copy()
+        if "DISPLAY" not in env:
+            env["DISPLAY"] = ":0"  # gamescope default
+        
+        try:
+            self._overlay_process = subprocess.Popen(
+                ["python3", overlay_script],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True  # independent from decky process tree
+            )
+            decky_plugin.logger.info(f"[OVERLAY] spawned native renderer PID={self._overlay_process.pid}")
+            return {"status": "started", "message": f"Overlay PID {self._overlay_process.pid}", "pid": self._overlay_process.pid}
+        except Exception as e:
+            decky_plugin.logger.error(f"[OVERLAY] failed to spawn: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def stop_native_overlay(self, *args, **kwargs):
+        """kill the native overlay renderer subprocess"""
+        if self._overlay_process:
+            try:
+                pid = self._overlay_process.pid
+                # send SIGTERM first (graceful)
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                self._overlay_process.wait(timeout=3)
+                decky_plugin.logger.info(f"[OVERLAY] killed renderer PID={pid}")
+            except Exception as e:
+                # force kill
+                try:
+                    os.killpg(os.getpgid(self._overlay_process.pid), signal.SIGKILL)
+                except:
+                    pass
+                decky_plugin.logger.info(f"[OVERLAY] force killed renderer")
+            self._overlay_process = None
+        return {"status": "stopped"}
+    
+    async def set_overlay_mode(self, *args, **kwargs):
+        """switch between bar and ball mode on the native overlay"""
+        if args:
+            mode_input = args[0] if isinstance(args[0], str) else str(args[0])
+        else:
+            mode_input = kwargs.get("mode", "bar")
+        self._overlay_mode = mode_input
+        decky_plugin.logger.info(f"[OVERLAY] mode set to: {self._overlay_mode}")
+        return {"mode": self._overlay_mode}
 
     async def _main(self):
         """plugin startup - load everything and start the sensor thread"""
@@ -298,6 +435,20 @@ class Plugin:
             decky_plugin.logger.error("Core is offline. overlay will show error values.")
 
     async def _unload(self):
-        """plugin shutdown - stop the thread and clean up"""
+        """plugin shutdown - stop everything and clean up"""
         self._running = False
+        # kill native overlay
+        await self.stop_native_overlay()
+        # cleanup IPC
+        for client in self._ipc_clients:
+            try:
+                client.close()
+            except:
+                pass
+        if self._ipc_server_sock:
+            try:
+                self._ipc_server_sock.close()
+                os.unlink("/tmp/mutemotion.sock")
+            except:
+                pass
         decky_plugin.logger.info("MuteMotion Shim dismounted. see u next boot.")
