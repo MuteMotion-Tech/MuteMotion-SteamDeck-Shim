@@ -26,7 +26,7 @@ from Xlib.ext import shape
 SCREEN_W = 1280  # steam deck LCD resolution
 SCREEN_H = 800
 SOCK_PATH = "/tmp/mutemotion.sock"
-TARGET_FPS = 60
+TARGET_FPS = 90
 
 # ============================================================
 # main overlay class
