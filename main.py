@@ -1,3 +1,14 @@
+# =============================================================================
+# MuteMotion Shim — SteamOS Decky Plugin Backend
+# =============================================================================
+# the python brain behind the curtain. reads IMU data from the Neptune
+# controller via hidraw, runs it through sensor fusion, and pushes it
+# to both the React frontend (via RPC) and native overlay (via IPC).
+#
+# fun fact: this file has survived more rewrites than my will to live.
+# but we're here. we're shipping. ggs.
+# =============================================================================
+
 import decky_plugin
 import sys
 import os
@@ -9,9 +20,9 @@ import subprocess
 import socket
 import json
 import signal
-import fcntl
+import fcntl  # for hidraw ioctl (we tried ioctl FR it doesnt work but we keep the import for vibes)
 
-# make py_modules importable
+# make py_modules importable so ctypes can find our .so
 plugin_dir = decky_plugin.DECKY_PLUGIN_DIR
 py_modules_dir = os.path.join(plugin_dir, "py_modules")
 sys.path.append(py_modules_dir)
@@ -23,14 +34,15 @@ try:
     decky_plugin.logger.info("Core loaded. neptune is armed and dangerous.")
 except Exception as e:
     decky_plugin.logger.error(f"Core failed to load (running in safe mode): {e}")
-    core_engine = None
+    core_engine = None  # we'll survive... barely
 
 
 class Plugin:
     def __init__(self):
         self._running = True
         self._reader_thread = None
-        # raw sensor values (after divisor + axis swap)
+
+        # raw sensor values (after cursed axis swap — more on that below)
         self.gyro_x = 0.0
         self.gyro_y = 0.0
         self.gyro_z = 0.0
@@ -38,27 +50,64 @@ class Plugin:
         self.accel_y = 0.0
         self.accel_z = 0.0
         self.last_offset = 0.0
-        # watchdog diagnostics (exposed via get_watchdog_status RPC)
+
+        # watchdog stats (the QAM shows these so we can flex our uptime)
         self._last_data_timestamp = 0.0
         self._watchdog_fires = 0
         self._active_fd_count = 0
         self._reader_alive = False
-        # sensor fusion states
+
+        # complementary filter states (α=0.98 gang)
         self.pitch = 0.0
         self.roll = 0.0
         self.last_imu_time = 0.0
-        # native overlay subprocess (gamescope bypass)
+
+        # native overlay process (the gamescope bypass that actually works)
         self._overlay_process = None
-        self._ipc_clients = []  # connected overlay renderers
+        self._ipc_clients = []      # connected overlay renderers
         self._ipc_server_sock = None
-        self._overlay_mode = "bar"  # "bar" or "ball"
+        self._overlay_mode = "bar"  # "bar" or "ball" — user picks in QAM
+
+        # ===================================================================
+        # VDF CONFIGURATION OVERRIDE — the "Decoy Binding" strategy
+        # ===================================================================
+        # tl;dr: Steam puts the gyro to sleep if no controller profile uses it.
+        # we inject a silent gyro_to_mouse group into the default templates,
+        # then yell at Steam to reload them via steam:// URI. this tricks
+        # Steam into thinking gyro is needed, keeping the IMU awake forever.
+        # yes, we literally gaslight the steam client. it's called engineering.
+        # ===================================================================
+        decky_plugin.logger.info("Executing Configuration Override (Decoy Binding) Injection...")
+        try:
+            # lazy import — vdf_modifier lives next to us in the plugin dir
+            # gotta manually shove our dir into sys.path or python wont find it
+            plugin_base = os.path.dirname(os.path.abspath(__file__))
+            if plugin_base not in sys.path:
+                sys.path.insert(0, plugin_base)
+            import vdf_modifier
+
+            # step 1: patch the VDF templates on disk (adds gyro_to_mouse group)
+            injections = vdf_modifier.apply_decoy_to_all()
+
+            # step 2: force steam to actually READ our patches
+            # (steam caches configs in memory and ignores disk changes. rude.)
+            app_id = vdf_modifier.get_running_app_id()
+            vdf_modifier.force_apply_gyro_profile(app_id)
+
+        except Exception as e:
+            decky_plugin.logger.error(f"VDF injection failed during import/exec: {e}")
+            injections = False
+        if injections:
+            decky_plugin.logger.info("Decoy bindings successfully applied.")
+        else:
+            decky_plugin.logger.warning("Failed to apply decoy bindings or no configs found.")
 
     def _find_hidraw_devices(self):
-        """scan /sys/class/hidraw/ for neptune controller endpoints (28DE:1205)"""
+        """scan /sys/class/hidraw/ for neptune controller endpoints (VID:28DE PID:1205)"""
         base_path = "/sys/class/hidraw/"
         devices = []
         if not os.path.exists(base_path):
-            return devices  # not on a device with hidraw, probably dev pc
+            return devices  # no hidraw = probably dev pc, carry on
 
         for dev in os.listdir(base_path):
             dev_path = os.path.join(base_path, dev)
@@ -76,21 +125,23 @@ class Plugin:
 
     def _hardware_reader_loop(self):
         """
-        multiplexed hidraw polling loop with watchdog recovery
-        opens ALL neptune endpoints and listens on all of them simultaneously
-        using select() bc epoll is overkill and this isnt a kernel driver
-        
-        anti-zero-lock: skips endpoints sending all zeros (dead/inactive)
-        auto-locks onto whichever endpoint has actual IMU data
-        
-        WATCHDOG: if no data arrives for 2 seconds, assumes steam/gamescope
-        stole the device. closes everything and re-scans hidraw endpoints.
-        this is the gamescope bypass - we just keep trying until steam lets go.
+        THE MAIN EVENT — multiplexed hidraw polling with watchdog recovery.
+
+        opens ALL neptune endpoints and listens on them simultaneously via
+        select() because epoll is overkill and this isnt a kernel driver lmao.
+
+        anti-zero-lock: some hidraw endpoints send all zeroes (they're posers).
+        we skip those and auto-lock onto whichever fd has actual IMU data.
+
+        WATCHDOG: if no data arrives for 2s, we assume steam/gamescope yeeted
+        our device access. close everything, re-scan, keep trying. persistence
+        is key. also the VDF decoy binding should prevent this now but we keep
+        the watchdog because trust issues are valid.
         """
         decky_plugin.logger.info("starting multiplexed hidraw polling w/ watchdog...")
         import select
 
-        WATCHDOG_TIMEOUT = 2.0  # seconds of silence before we re-scan
+        WATCHDOG_TIMEOUT = 2.0  # seconds of silence = something is sus
         RESCAN_COOLDOWN = 1.0   # dont spam re-scans, chill between attempts
 
         def open_neptune_fds():
@@ -99,7 +150,7 @@ class Plugin:
             opened = []
             for path in hidraw_paths:
                 try:
-                    # Must be O_RDWR to allow HIDIOCSFEATURE IOCTL to write the wakeup command
+                    # O_RDWR lets us use ioctl if needed (legacy — VDF bypass is better)
                     fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
                     opened.append(fd)
                     decky_plugin.logger.info(f"opened {path} (fd={fd})")
@@ -107,7 +158,7 @@ class Plugin:
                     decky_plugin.logger.error(f"cant open {path}: {e}")
             return opened
 
-        # initial device scan - wait for neptune to show up on boot
+        # wait for neptune to show up at the party
         fds = []
         while self._running and not fds:
             fds = open_neptune_fds()
@@ -118,22 +169,6 @@ class Plugin:
         if not self._running:
             return
 
-        # =========================================================
-        # Neptune Firmware Wake Command Payload (HIDIOCSFEATURE)
-        # =========================================================
-        # 0x87 = ID_SET_SETTINGS_VALUES
-        # 0x03 = length (reg + 2 byte value)
-        # 0x30 = SETTING_IMU_MODE (48)
-        # 0x1C = BIT(2)|BIT(3)|BIT(4) -> Send Gyro, Accel, Orientation
-        # 0x00 = High byte
-        # =========================================================
-        HIDIOCSFEATURE_65 = 0xC0414806
-        WAKE_REPORT = bytearray(65)
-        WAKE_REPORT[0] = 0x87
-        WAKE_REPORT[1] = 0x03
-        WAKE_REPORT[2] = 0x30
-        WAKE_REPORT[3] = 0x1C
-        WAKE_REPORT[4] = 0x00
 
         tick_counter = 0
         imu_active_endpoint = None
@@ -146,14 +181,10 @@ class Plugin:
                 readable, _, _ = select.select(fds, [], [], 0.05)
                 
                 if not readable:
-                    # Firmware is asleep because Steam Input put it in a low-power state.
-                    # Send active heartbeat to force sensors awake!
-                    for fd in fds:
-                        try:
-                            fcntl.ioctl(fd, HIDIOCSFEATURE_65, WAKE_REPORT)
-                        except Exception:
-                            pass
-                
+                    # nothing came in this tick. thats fine — the VDF decoy
+                    # should be keeping the IMU awake. just a quiet 50ms. nbd.
+                    pass
+
                 for r_fd in readable:
                     try:
                         data = os.read(r_fd, 64)
@@ -192,16 +223,17 @@ class Plugin:
                         raw_gyro_y = parsed[4]
                         raw_gyro_z = parsed[5]
 
-                        # the cursed axis swap (hardware Y <-> software Z)
-                        # neptune decided left is up and up is sideways
-                        # incident 034 wants you to remember this
-                        self.accel_x = raw_accel_x / 16384.0   # lateral
-                        self.accel_y = raw_accel_z / 16384.0   # swapped!
-                        self.accel_z = raw_accel_y / 16384.0   # swapped!
+                        # THE CURSED AXIS SWAP™ (hardware Y <-> software Z)
+                        # whoever designed Neptune's IMU orientation was on something
+                        # left is up, up is sideways, and we just have to deal with it
+                        # (incident 034 sends its regards)
+                        self.accel_x = raw_accel_x / 16384.0   # lateral (this one's normal at least)
+                        self.accel_y = raw_accel_z / 16384.0   # swapped! Y ← Z
+                        self.accel_z = raw_accel_y / 16384.0   # swapped! Z ← Y
 
-                        self.gyro_x = raw_gyro_x / 16.0
-                        self.gyro_y = raw_gyro_z / 16.0        # swapped!
-                        self.gyro_z = raw_gyro_y / 16.0        # swapped!
+                        self.gyro_x = raw_gyro_x / 16.0        # pitch velocity
+                        self.gyro_y = raw_gyro_z / 16.0        # swapped! yaw ← Z
+                        self.gyro_z = raw_gyro_y / 16.0        # swapped! roll ← Y
 
                         # sensor fusion (Complementary Filter)
                         current_time = time.time()
@@ -222,9 +254,11 @@ class Plugin:
                             accel_pitch = 0.0
                             accel_roll = 0.0
 
-                        # fuse gyro and accel (Alpha = 0.98 favors gyro for short term, accel for long term drift correction)
+                        # SENSOR FUSION — Complementary Filter (α=0.98)
+                        # 98% gyro (fast, accurate, drifts over time) +
+                        # 2% accelerometer (slow, noisy, but gravity never lies)
+                        # this is the secret sauce that makes the overlay buttery smooth
                         alpha = 0.98
-                        # Note: Gyro_x is lateral rotation (pitch velocity), Gyro_z is longitudinal rotation (roll velocity)
                         self.pitch = alpha * (self.pitch + self.gyro_x * dt) + (1.0 - alpha) * accel_pitch
                         self.roll = alpha * (self.roll + self.gyro_z * dt) + (1.0 - alpha) * accel_roll
 
@@ -236,42 +270,42 @@ class Plugin:
                                 f"dt:{dt:.3f}s"
                             )
 
-                        # feed the brain
+                        # feed the C++ brain (it does the heavy math we're too lazy to rewrite)
                         if core_engine:
                             gyro_tup = (self.gyro_x, self.gyro_y, self.gyro_z)
                             accel_tup = (self.accel_x, self.accel_y, self.accel_z)
                             self.last_offset = self.roll + self.pitch
 
-                        # push IMU data to native overlay via IPC socket
+                        # yeet IMU data to the native overlay via unix socket
                         self._push_ipc_data()
 
-                # === WATCHDOG: detect steam/gamescope stealing our device ===
+                # ======= WATCHDOG: did steam steal our devices again? =======
                 if time.time() - last_data_time > WATCHDOG_TIMEOUT:
                     self._watchdog_fires += 1
                     decky_plugin.logger.info(f"[WATCHDOG] fire #{self._watchdog_fires}, re-scanning hidraw devices...")
-                    
-                    # close all stale fds
+
+                    # close all stale fds (they're ghosts now)
                     for fd in fds:
                         try:
                             os.close(fd)
                         except:
                             pass
-                    
-                    # cooldown so we dont hammer the filesystem
+
+                    # chill for a sec so we dont ddos the filesystem
                     time.sleep(RESCAN_COOLDOWN)
-                    
-                    # re-open fresh
+
+                    # try again. never give up. never surrender.
                     fds = open_neptune_fds()
                     imu_active_endpoint = None
-                    
+
                     self._active_fd_count = len(fds)
                     if fds:
-                        last_data_time = time.time()  # reset watchdog
+                        last_data_time = time.time()
                         decky_plugin.logger.info(f"[WATCHDOG] re-acquired {len(fds)} endpoints, resuming...")
                     else:
-                        decky_plugin.logger.error("[WATCHDOG] neptune disappeared, will retry in 2s...")
+                        decky_plugin.logger.error("[WATCHDOG] neptune vanished into the shadow realm, retrying in 2s...")
                         time.sleep(2)
-                        last_data_time = time.time()  # prevent watchdog spam
+                        last_data_time = time.time()  # dont spam the logs
 
             except Exception as e:
                 import traceback
@@ -285,18 +319,18 @@ class Plugin:
             except:
                 pass
 
-    # === DECKY CALLABLE API ===
-    # the frontend calls these via call("function_name")
-    # they return python dicts that become JS objects
+    # =================== DECKY RPC API ===================
+    # the React frontend calls these via call("function_name")
+    # they return python dicts that magically become JS objects
+    # shoutout to decky loader for making this braindead simple
 
     async def get_visual_offset(self, *args, **kwargs):
         """
-        the main data endpoint - frontend polls this at ~60fps
-        returns everything the overlay needs to render
+        THE main data endpoint — frontend polls this at ~60fps.
+        returns everything the overlay needs to look alive.
         """
         if not core_engine:
-            # safe mode: return error sentinel values
-            # frontend checks for -99.9 to know something is wrong
+            # safe mode: error sentinel values (-99.9 = core is dead)
             return {
                 "offset": -99.9, "offset_x": 0, "offset_y": 0,
                 "rx": -99.9, "ry": -99.9, "rz": -99.9,
@@ -305,10 +339,8 @@ class Plugin:
 
         try:
             offset = getattr(self, 'last_offset', 0.0)
-            # mapping true angles directly
-            ox = float(self.roll) * -1.0  # invert roll for native rendering
+            ox = float(self.roll) * -1.0  # invert roll for correct screen direction
             oy = float(self.pitch)
-
 
             return {
                 "offset": float(offset),
@@ -323,6 +355,7 @@ class Plugin:
             }
         except Exception as e:
             decky_plugin.logger.error(f"get_visual_offset died: {e}")
+            # -88.8 = something broke mid-calculation (frontend shows error state)
             return {
                 "offset": -88.8, "offset_x": 0, "offset_y": 0,
                 "rx": -88.8, "ry": -88.8, "rz": -88.8,
@@ -330,7 +363,7 @@ class Plugin:
             }
 
     async def ping_engine(self, *args, **kwargs):
-        """test endpoint to verify RPC bridge is alive - now with toast notifications"""
+        """health check — the QAM button calls this to make sure we're not dead"""
         decky_plugin.logger.info("MuteMotion Engine Ping Received!")
         if core_engine:
             return {"status": "online", "message": "Core is Active"}
@@ -338,7 +371,7 @@ class Plugin:
             return {"status": "fallback", "message": "Core is Offline (Safe Mode)"}
 
     async def get_watchdog_status(self, *args, **kwargs):
-        """diagnostics endpoint - shows sensor thread health in the QAM"""
+        """diagnostics endpoint — the QAM shows live thread health from this"""
         now = time.time()
         data_age = now - self._last_data_timestamp if self._last_data_timestamp > 0 else -1
         overlay_alive = self._overlay_process is not None and self._overlay_process.poll() is None
@@ -353,7 +386,7 @@ class Plugin:
         }
 
     def _start_ipc_server(self):
-        """start unix domain socket server for overlay IPC"""
+        """spin up the unix socket so the native overlay can talk to us"""
         sock_path = "/tmp/mutemotion.sock"
         # cleanup stale socket
         try:
@@ -368,7 +401,7 @@ class Plugin:
         decky_plugin.logger.info(f"[IPC] socket server listening on {sock_path}")
     
     def _accept_ipc_clients(self):
-        """non-blocking accept of new overlay connections"""
+        """non-blocking — check if the overlay renderer is trying to connect"""
         if not self._ipc_server_sock:
             return
         try:
@@ -377,17 +410,16 @@ class Plugin:
             self._ipc_clients.append(client)
             decky_plugin.logger.info(f"[IPC] overlay renderer connected ({len(self._ipc_clients)} clients)")
         except BlockingIOError:
-            pass  # no new connections, thats fine
+            pass  # nobody home, thats fine
     
     def _push_ipc_data(self):
-        """push latest IMU data to all connected overlay renderers"""
-        self._accept_ipc_clients()  # check for new connections
-        
+        """blast IMU data to all connected overlay renderers via unix socket"""
+        self._accept_ipc_clients()  # anyone new?
+
         if not self._ipc_clients:
             return
-        
-        # build the data packet
-        # Send true Euler angles to the overlay
+
+        # build the JSON packet — euler angles + current overlay mode
         ox = float(self.roll) * -1.0
         oy = float(self.pitch)
         data = json.dumps({
@@ -396,14 +428,14 @@ class Plugin:
             "mode": self._overlay_mode,
         }).encode() + b"\n"
         
-        # send to all clients, remove dead ones
+        # broadcast to everyone, yeet the dead connections
         dead = []
         for client in self._ipc_clients:
             try:
                 client.sendall(data)
             except (BrokenPipeError, ConnectionResetError, OSError):
-                dead.append(client)
-        
+                dead.append(client)  # rip
+
         for d in dead:
             try:
                 d.close()
@@ -412,7 +444,7 @@ class Plugin:
             self._ipc_clients.remove(d)
     
     async def start_native_overlay(self, *args, **kwargs):
-        """spawn the native overlay renderer subprocess"""
+        """spawn the X11 overlay renderer — the one that actually survives gamescope"""
         # kill existing if running
         await self.stop_native_overlay()
         
@@ -426,19 +458,18 @@ class Plugin:
             decky_plugin.logger.error(f"[OVERLAY] script not found: {overlay_script}")
             return {"status": "error", "message": "overlay_renderer.py not found"}
         
-        # spawn as independent subprocess
-        # inherit DISPLAY so it can connect to xwayland
+        # spawn as independent process (new session so gamescope cant kill it with decky)
         env = os.environ.copy()
         if "DISPLAY" not in env:
-            env["DISPLAY"] = ":0"  # gamescope default
-        
+            env["DISPLAY"] = ":0"  # gamescope's default xwayland display
+
         try:
             self._overlay_process = subprocess.Popen(
                 ["python3", overlay_script],
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=True  # independent from decky process tree
+                start_new_session=True  # escape decky's process tree. you're free now
             )
             decky_plugin.logger.info(f"[OVERLAY] spawned native renderer PID={self._overlay_process.pid}")
             return {"status": "started", "message": f"Overlay PID {self._overlay_process.pid}", "pid": self._overlay_process.pid}
@@ -447,7 +478,7 @@ class Plugin:
             return {"status": "error", "message": str(e)}
     
     async def stop_native_overlay(self, *args, **kwargs):
-        """kill the native overlay renderer subprocess"""
+        """murder the overlay renderer subprocess (gracefully, then not)"""
         if self._overlay_process:
             try:
                 pid = self._overlay_process.pid
@@ -466,7 +497,7 @@ class Plugin:
         return {"status": "stopped"}
     
     async def set_overlay_mode(self, *args, **kwargs):
-        """switch between bar and ball mode on the native overlay"""
+        """switch between bar and ball mode — user picks their vibe in the QAM"""
         if args:
             mode_input = args[0] if isinstance(args[0], str) else str(args[0])
         else:
@@ -476,7 +507,7 @@ class Plugin:
         return {"mode": self._overlay_mode}
 
     async def _main(self):
-        """plugin startup - load everything and start the sensor thread"""
+        """plugin startup — load everything and send the sensor thread to war"""
         decky_plugin.logger.info("MuteMotion Shim initialized")
         if core_engine:
             decky_plugin.logger.info("Core is online. starting hardware interceptor...")
@@ -488,11 +519,11 @@ class Plugin:
             decky_plugin.logger.error("Core is offline. overlay will show error values.")
 
     async def _unload(self):
-        """plugin shutdown - stop everything and clean up"""
+        """plugin shutdown — clean up everything. leave no traces. professional."""
         self._running = False
-        # kill native overlay
+        # kill the overlay subprocess
         await self.stop_native_overlay()
-        # cleanup IPC
+        # close all IPC connections
         for client in self._ipc_clients:
             try:
                 client.close()
@@ -504,4 +535,4 @@ class Plugin:
                 os.unlink("/tmp/mutemotion.sock")
             except:
                 pass
-        decky_plugin.logger.info("MuteMotion Shim dismounted. see u next boot.")
+        decky_plugin.logger.info("MuteMotion Shim dismounted. see u next boot. gg wp. 🫡")

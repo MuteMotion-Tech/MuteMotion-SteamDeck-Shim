@@ -1,21 +1,72 @@
+# ============================================
+# MuteMotion Decky Plugin — .gitignore
+# ============================================
+# based on the official decky-plugin-template
+
+# Dependencies
 node_modules/
+bower_components/
+.pnpm-store/
+
+# Build artifacts
 dist/
-.vscode/
+out/
+out/*
+build_payload/
+__pycache__/
+
+# IDE / Editor
+.vscode/settings.json
 .idea/
+*.iml
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
 *.log
 *.bak
-.DS_Store
+*.seed
+*.csv
+*.dat
+*.out
+*.pid
+*.gz
+*.swp
+pids/
+logs/
+results/
+tmp/
 
-# Dev Tools & Logs
+# Coverage
+coverage/
+
+# Compiled native modules (downloaded at build time, not stored in repo)
+py_modules/libmutemotion_core.so
+
+# Decky loader module (auto-provided at runtime, never commit)
+decky_plugin.py
+
+# CLI tools
+cli/
+cli/*
+
+# ============================================
+# LOCAL-ONLY dev scripts (contain credentials
+# or personal configuration — NEVER push these)
+# ============================================
+deploy.sh
+deploy.py
+askpass.sh
+fix_git_identity.sh
+sanitize_dist.py
+
+# Local dev notes (not part of the plugin)
 TESTING_LOG.md
 TO-DO.md
-deploy.py
-deploy.sh
-askpass.sh
-sanitize_dist.py
-main.py
-fix_git_identity.sh
 RECOVERY_NOTE.md
 DEV_NOTE.md
-py_modules/libmutemotion_core.so
-build_payload/
+
+# eBPF header (gigantic, dev-only)
+vmlinux.h
