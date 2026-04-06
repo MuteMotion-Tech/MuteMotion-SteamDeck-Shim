@@ -41,3 +41,15 @@ export class StateBoolean extends BaseState<boolean> {
         super(initialValue);
     }
 }
+
+export class StateString extends BaseState<string> {
+    constructor(initialValue = "") {
+        super(initialValue);
+    }
+}
+
+export class StateNumber extends BaseState<number> {
+    constructor(initialValue = 1.0) {
+        super(initialValue);
+    }
+}

@@ -2,22 +2,19 @@ import React, { VFC, useEffect, useRef } from "react";
 import { call } from "@decky/api";
 
 // =============================================================================
-// BallView — Canvas 2D + Critically Damped Spring Physics (Single Dot Mode)
+// LiquidLevelView — Canvas 2D + Critically Damped Spring Physics (Fluid Ripple)
 // =============================================================================
 // Render loop driven by setInterval (NOT requestAnimationFrame) to survive
 // Gamescope CEF render-pause during game launch.
 // =============================================================================
 
-const OMEGA = 20.0;           // spring constant
-const TRAIL_LENGTH = 10;      // length of ghost tail
-const DOT_RADIUS = 15;        // single dot is larger than grid dots
-const GAIN_X = 16.0;
-const GAIN_Y = 24.0;
-const MAX_TRAVEL_X = 400.0;   // much larger bounds for single ball
-const MAX_TRAVEL_Y = 250.0;
+const OMEGA = 18.0;           // slightly softer spring for liquid feel
+const GAIN_ROLL = 1.5;        // multiplier for rotation (deg)
+const GAIN_PITCH = 8.0;       // multiplier for vertical translation (px)
+const MAX_ROLL = 45.0;        // maximum rotation in degrees
+const MAX_PITCH = 250.0;      // maximum vertical displacement
 const RENDER_INTERVAL = 16;   // ~60fps via setInterval
 
-/** Analytical critically damped spring — exact ODE solution */
 function updateSpring(
     pos: number, vel: number, target: number, dt: number
 ): { pos: number; vel: number } {
@@ -32,19 +29,17 @@ function updateSpring(
     };
 }
 
-export const BallView: VFC = () => {
+export const LiquidLevelView: VFC = () => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const lastTimeRef = useRef<number>(0);
-    const targetRef = useRef({ x: 0, y: 0 });
+    const targetRef = useRef({ roll: 0, pitch: 0 });
     const opacityRef = useRef(0.8);
 
-    // simple spring state for the single dot alongside frame history buffer
     const stateRef = useRef({
-        posX: 0, posY: 0, velX: 0, velY: 0,
-        trail: [] as {x: number, y: number}[]
+        posRoll: 0, velRoll: 0,
+        posPitch: 0, velPitch: 0
     });
 
-    // poll IMU data — decoupled from render loop
     useEffect(() => {
         let mounted = true;
         const poll = async () => {
@@ -53,10 +48,14 @@ export const BallView: VFC = () => {
                 const r: any = await call("get_visual_offset", {});
                 if (r && r.offset !== undefined && r.offset !== -88.8) {
                     const inv = r.invert_axis === false ? 1.0 : -1.0;
-                    const rx = (r.offset_x || 0) * GAIN_X * inv;
-                    const ry = (r.offset_y || 0) * GAIN_Y * inv;
-                    targetRef.current.x = Math.max(-MAX_TRAVEL_X, Math.min(MAX_TRAVEL_X, rx));
-                    targetRef.current.y = Math.max(-MAX_TRAVEL_Y, Math.min(MAX_TRAVEL_Y, ry));
+                    
+                    // x is roll, y is pitch in this context
+                    const rTarget = (r.offset_x || 0) * GAIN_ROLL * inv;
+                    const pTarget = (r.offset_y || 0) * GAIN_PITCH * inv;
+                    
+                    targetRef.current.roll = Math.max(-MAX_ROLL, Math.min(MAX_ROLL, rTarget));
+                    targetRef.current.pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, pTarget));
+                    
                     if (r.opacity !== undefined) opacityRef.current = r.opacity;
                 }
             } catch (_) {}
@@ -74,12 +73,6 @@ export const BallView: VFC = () => {
         const ctx = canvas.getContext("2d");
         lastTimeRef.current = 0;
 
-        // set initial position to center
-        const cw0 = canvas.clientWidth || 1280;
-        const ch0 = canvas.clientHeight || 800;
-        stateRef.current.posX = cw0 / 2;
-        stateRef.current.posY = ch0 / 2;
-
         const renderFrame = () => {
             if (!ctx) return;
             const now = performance.now();
@@ -90,8 +83,6 @@ export const BallView: VFC = () => {
             if (canvas.width !== cw || canvas.height !== ch) {
                 canvas.width = cw;
                 canvas.height = ch;
-                stateRef.current.posX = cw / 2;
-                stateRef.current.posY = ch / 2;
             }
 
             if (lastTimeRef.current === 0) lastTimeRef.current = now;
@@ -106,44 +97,54 @@ export const BallView: VFC = () => {
 
             ctx.clearRect(0, 0, w, h);
 
-            const centerX = w / 2;
-            const centerY = h / 2;
-
-            // global target pos
-            const tx = centerX + target.x;
-            const ty = centerY + target.y;
-
             const s = stateRef.current;
-            const rx = updateSpring(s.posX, s.velX, tx, dt);
-            const ry = updateSpring(s.posY, s.velY, ty, dt);
-            s.posX = rx.pos; s.velX = rx.vel;
-            s.posY = ry.pos; s.velY = ry.vel;
+            const rRoll = updateSpring(s.posRoll, s.velRoll, target.roll, dt);
+            const rPitch = updateSpring(s.posPitch, s.velPitch, target.pitch, dt);
+            s.posRoll = rRoll.pos; s.velRoll = rRoll.vel;
+            s.posPitch = rPitch.pos; s.velPitch = rPitch.vel;
 
-            // buffer current frame coords into history sequence for ghosts
-            s.trail.push({ x: s.posX, y: s.posY });
-            if (s.trail.length > TRAIL_LENGTH) s.trail.shift();
+            ctx.save();
+            ctx.translate(w / 2, h / 2);
+            ctx.rotate((s.posRoll * Math.PI) / 180);
+            ctx.translate(0, s.posPitch);
 
-            // draw chronological trace back into history buffer
-            for (let t = 0; t < s.trail.length; t++) {
-                const hist = s.trail[t];
-                const trailAlpha = baseAlpha * ((t + 1) / s.trail.length) * 0.4;
-                const trailRadius = DOT_RADIUS * ((t + 1) / s.trail.length);
-                ctx.beginPath();
-                ctx.arc(hist.x, hist.y, trailRadius, 0, Math.PI * 2);
-                ctx.fillStyle = `rgba(0, 255, 204, ${trailAlpha})`;
-                ctx.fill();
-            }
+            // the liquid surface ripples harder the faster the device rotates
+            const waveAmp = Math.min(25, Math.abs(s.velRoll) * 0.6) + 3;
+            const phase = (now / 1000) * 4 + (s.posRoll * 0.08);
 
-            // Draw glowing main ball
             ctx.beginPath();
-            ctx.arc(s.posX, s.posY, DOT_RADIUS, 0, Math.PI * 2);
-            ctx.fillStyle = `rgba(0, 255, 204, ${baseAlpha})`;
-            ctx.shadowColor = `rgba(0, 255, 204, ${baseAlpha * 0.5})`;
-            ctx.shadowBlur = 15;
+            // fill an ultra wide bounding box that covers edges regardless of rotation
+            const EXTENT = 2000; 
+            ctx.moveTo(-EXTENT, EXTENT); // deep bottom left
+            ctx.lineTo(-EXTENT, 0); // surface left
+            
+            // draw sine wave surface
+            for (let x = -EXTENT; x <= EXTENT; x += 40) {
+                const y = Math.sin(x * 0.015 + phase) * waveAmp;
+                ctx.lineTo(x, y);
+            }
+            
+            ctx.lineTo(EXTENT, EXTENT); // deep bottom right
+            ctx.closePath();
+
+            // glowing neon fluid
+            ctx.fillStyle = `rgba(0, 255, 204, ${baseAlpha * 0.4})`;
             ctx.fill();
 
-            // reset shadow for next frame to prevent accumulation bugs
-            ctx.shadowBlur = 0;
+            // draw an intense highlight line right at the meniscus barrier
+            ctx.beginPath();
+            for (let x = -EXTENT; x <= EXTENT; x += 40) {
+                const y = Math.sin(x * 0.015 + phase) * waveAmp;
+                if (x === -EXTENT) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.strokeStyle = `rgba(0, 255, 204, ${baseAlpha})`;
+            ctx.lineWidth = 4;
+            ctx.shadowColor = `rgba(0, 255, 204, ${baseAlpha})`;
+            ctx.shadowBlur = 10;
+            ctx.stroke();
+
+            ctx.restore();
         };
 
         const iv = setInterval(renderFrame, RENDER_INTERVAL);

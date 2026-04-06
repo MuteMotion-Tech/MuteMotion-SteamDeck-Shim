@@ -1,8 +1,11 @@
+export type PresetMode = "dot" | "dotgrid" | "horizon" | "liquid";
+
 export interface MuteMotionState {
     isEnabled: boolean;
-    useBallMode: boolean;
+    presetMode: PresetMode;
     showDebugArea: boolean;
     sensitivity: number;
+    intensity: number;
 }
 
 export interface TelemetryData {
@@ -15,4 +18,7 @@ export interface TelemetryData {
     ax: number;
     ay: number;
     az: number;
+    intensity: number;
+    opacity: number;
+    invert_axis: boolean;
 }

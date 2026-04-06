@@ -6,6 +6,8 @@ import {
     PanelSection,
     PanelSectionRow,
     ToggleField,
+    SliderField,
+    DropdownItem,
     DialogButton,
     staticClasses,
 } from "@decky/ui";
@@ -13,19 +15,42 @@ import { FaShip } from "react-icons/fa";
 import React, { VFC, useState, useEffect } from "react";
 import { routerHook, toaster } from "@decky/api";
 
-import { StateBoolean } from "./state";
+import { StateBoolean, StateString, StateNumber } from "./state";
 import { useUIComposition, UIComposition } from "./uiComposition";
 import { HorizonBar } from "./components/HorizonBar";
 import { BallView } from "./components/BallView";
+import { DotGridView } from "./components/DotGridView";
+import { LiquidLevelView } from "./components/LiquidLevelView";
 import { DebugHUD } from "./components/DebugHUD";
+import { PresetMode } from "./types";
 
-const Overlay: VFC<{ 
-    enabledState: StateBoolean, 
-    ballModeState: StateBoolean,
-    debugModeState: StateBoolean 
-}> = React.memo(({ enabledState, ballModeState, debugModeState }) => {
+// ============================================================
+// overlay preset registry
+// add new presets here and they automatically show up in the dropdown
+// ============================================================
+const PRESET_OPTIONS: { label: string; data: PresetMode }[] = [
+    { label: "Dot Grid (Default)", data: "dotgrid" },
+    { label: "Single Dot",         data: "dot" },
+    { label: "Horizon Bar",        data: "horizon" },
+    { label: "Liquid Level",       data: "liquid" },
+];
+
+// map preset mode → component
+const PresetComponent: Record<PresetMode, VFC> = {
+    dot: BallView,
+    dotgrid: DotGridView,
+    horizon: HorizonBar,
+    liquid: LiquidLevelView,
+};
+
+const Overlay: VFC<{
+    enabledState: StateBoolean,
+    presetState: StateString,
+    debugModeState: StateBoolean,
+    opacityState: StateNumber
+}> = React.memo(({ enabledState, presetState, debugModeState, opacityState }) => {
     const [visible, setVisible] = useState(enabledState.GetState());
-    const [useBall, setUseBall] = useState(ballModeState.GetState());
+    const [preset, setPreset] = useState(presetState.GetState());
     const [useDebug, setUseDebug] = useState(debugModeState.GetState());
 
     // "ghost mode" - use notification layer because the footer kept stealing my inputs
@@ -33,19 +58,19 @@ const Overlay: VFC<{
 
     useEffect(() => {
         const onEnabledChange = (val: boolean) => setVisible(val);
-        const onModeChange = (val: boolean) => setUseBall(val);
+        const onPresetChange = (val: string) => setPreset(val);
         const onDebugChange = (val: boolean) => setUseDebug(val);
-        
+
         enabledState.onStateChanged(onEnabledChange);
-        ballModeState.onStateChanged(onModeChange);
+        presetState.onStateChanged(onPresetChange);
         debugModeState.onStateChanged(onDebugChange);
-        
+
         return () => {
             enabledState.offStateChanged(onEnabledChange);
-            ballModeState.offStateChanged(onModeChange);
+            presetState.offStateChanged(onPresetChange);
             debugModeState.offStateChanged(onDebugChange);
         };
-    }, [enabledState, ballModeState, debugModeState]);
+    }, [enabledState, presetState, debugModeState]);
 
     // input isolation voodoo (click-through hack)
     useEffect(() => {
@@ -83,6 +108,9 @@ const Overlay: VFC<{
 
     if (!visible && !useDebug) return null;
 
+    // dynamically render the selected preset component
+    const ActivePreset = PresetComponent[preset as PresetMode] || DotGridView;
+
     return (
         <div
             style={{
@@ -94,11 +122,11 @@ const Overlay: VFC<{
                 pointerEvents: "none",
                 userSelect: "none",
                 touchAction: "none",
-                zIndex: 7002, // magic altitude that fits between game and steam ui
+                zIndex: 7002,
                 backgroundColor: "transparent",
             }}
         >
-            {visible && (useBall ? <BallView /> : <HorizonBar />)}
+            {visible && <ActivePreset />}
             {useDebug && <DebugHUD />}
         </div>
     );
@@ -114,7 +142,6 @@ const WatchdogStatus: VFC = () => {
                 .then((res: any) => { if (res) setStatus(res); })
                 .catch(() => {});
         }, 2000);
-        // immediate first fetch
         call("get_watchdog_status", {})
             .then((res: any) => { if (res) setStatus(res); })
             .catch(() => {});
@@ -140,30 +167,45 @@ const WatchdogStatus: VFC = () => {
     );
 };
 
-const Content: VFC<{ 
+const Content: VFC<{
     enabledState: StateBoolean,
-    ballModeState: StateBoolean,
+    presetState: StateString,
+    intensityState: StateNumber,
+    opacityState: StateNumber,
+    invertAxisState: StateBoolean,
     debugModeState: StateBoolean
-}> = React.memo(({ enabledState, ballModeState, debugModeState }) => {
+}> = React.memo(({ enabledState, presetState, intensityState, opacityState, invertAxisState, debugModeState }) => {
     const [isEnabled, setIsEnabled] = useState(enabledState.GetState());
-    const [isBallMode, setIsBallMode] = useState(ballModeState.GetState());
+    const [currentPreset, setCurrentPreset] = useState(presetState.GetState());
+    const [intensity, setIntensity] = useState(intensityState.GetState());
+    const [opacity, setOpacity] = useState(opacityState.GetState());
+    const [invertAxis, setInvertAxis] = useState(invertAxisState.GetState());
     const [isDebug, setIsDebug] = useState(debugModeState.GetState());
 
     useEffect(() => {
         const eHandler = (val: boolean) => setIsEnabled(val);
-        const bHandler = (val: boolean) => setIsBallMode(val);
+        const pHandler = (val: string) => setCurrentPreset(val);
+        const iHandler = (val: number) => setIntensity(val);
+        const opHandler = (val: number) => setOpacity(val);
+        const invHandler = (val: boolean) => setInvertAxis(val);
         const dHandler = (val: boolean) => setIsDebug(val);
-        
+
         enabledState.onStateChanged(eHandler);
-        ballModeState.onStateChanged(bHandler);
+        presetState.onStateChanged(pHandler);
+        intensityState.onStateChanged(iHandler);
+        opacityState.onStateChanged(opHandler);
+        invertAxisState.onStateChanged(invHandler);
         debugModeState.onStateChanged(dHandler);
-        
+
         return () => {
             enabledState.offStateChanged(eHandler);
-            ballModeState.offStateChanged(bHandler);
+            presetState.offStateChanged(pHandler);
+            intensityState.offStateChanged(iHandler);
+            opacityState.offStateChanged(opHandler);
+            invertAxisState.offStateChanged(invHandler);
             debugModeState.offStateChanged(dHandler);
         };
-    }, [enabledState, ballModeState, debugModeState]);
+    }, [enabledState, presetState, intensityState, opacityState, invertAxisState, debugModeState]);
 
     return (
         <>
@@ -177,10 +219,14 @@ const Content: VFC<{
                         setIsEnabled(val);
                         enabledState.SetState(val);
                         if (val) {
-                            call("start_native_overlay", {}).then((res: any) => {
-                                toaster.toast({ title: "MuteMotion", body: res?.message || "Overlay Started" });
-                            }).catch(() => {
-                                toaster.toast({ title: "MuteMotion", body: "Failed to start overlay" });
+                            // auto-calibrate on activation: reset offset to zero first
+                            // so the user's current position becomes the new neutral
+                            call("calibrate_imu", {}).then(() => {
+                                call("start_native_overlay", {}).then((res: any) => {
+                                    toaster.toast({ title: "MuteMotion", body: res?.message || "Overlay Started — Calibrated" });
+                                }).catch(() => {
+                                    toaster.toast({ title: "MuteMotion", body: "Failed to start overlay" });
+                                });
                             });
                         } else {
                             call("stop_native_overlay", {}).then(() => {
@@ -190,19 +236,133 @@ const Content: VFC<{
                     }}
                 />
             </PanelSectionRow>
-            
+
             <PanelSectionRow>
-                <ToggleField
-                    label="2D Ball Mode"
-                    description="Switch native overlay to ball tracking mode"
-                    checked={isBallMode}
-                    onChange={(val) => {
-                        setIsBallMode(val);
-                        ballModeState.SetState(val);
-                        call("set_overlay_mode", val ? "ball" : "bar");
+                <DropdownItem
+                    label="Overlay Preset"
+                    description="Choose visualization style"
+                    rgOptions={PRESET_OPTIONS.map((opt, idx) => ({
+                        label: opt.label,
+                        data: opt.data,
+                    }))}
+                    selectedOption={currentPreset}
+                    onChange={(option: { data: string; label: string }) => {
+                        setCurrentPreset(option.data);
+                        presetState.SetState(option.data);
+                        call("set_overlay_mode", option.data);
                     }}
                     disabled={!isEnabled}
                 />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+                <SliderField
+                    label="Intensity"
+                    description="How strongly the overlay reacts to motion"
+                    value={Math.round(intensity * 100)}
+                    min={0}
+                    max={200}
+                    step={1}
+                    showValue={true}
+                    onChange={(val: number) => {
+                        const trueVal = val / 100.0;
+                        setIntensity(trueVal);
+                        intensityState.SetState(trueVal);
+                        call("set_intensity", { intensity: trueVal });
+                    }}
+                    disabled={!isEnabled}
+                />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+                <SliderField
+                    label="Opacity"
+                    description="Base visibility of the motion cues"
+                    value={Math.round(opacity * 100)}
+                    min={5}
+                    max={100}
+                    step={1}
+                    showValue={true}
+                    onChange={(val: number) => {
+                        const trueVal = val / 100.0;
+                        setOpacity(trueVal);
+                        opacityState.SetState(trueVal);
+                        call("set_opacity", { opacity: trueVal });
+                    }}
+                    disabled={!isEnabled}
+                />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+                <ToggleField
+                    label="Invert Axis"
+                    description="Move opposite to tilt"
+                    checked={invertAxis}
+                    onChange={(val) => {
+                        setInvertAxis(val);
+                        invertAxisState.SetState(val);
+                        call("set_invert_axis", { invert_axis: val });
+                    }}
+                    disabled={!isEnabled}
+                />
+            </PanelSectionRow>
+
+            <div style={{ height: 1, backgroundColor: "#3a3a3c", margin: "12px 0" }} />
+
+            <PanelSectionRow>
+                <DialogButton
+                    disabled={!isEnabled}
+                    onClick={() => {
+                        call("calibrate_imu", {})
+                            .then(() => {
+                                toaster.toast({
+                                    title: "MuteMotion",
+                                    body: "Calibrated — current position is now zero"
+                                });
+                            })
+                            .catch(() => {
+                                toaster.toast({
+                                    title: "MuteMotion",
+                                    body: "Calibration failed"
+                                });
+                            });
+                    }}
+                >
+                    Calibrate
+                </DialogButton>
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+                <DialogButton
+                    onClick={() => {
+                        call("reset_settings", {})
+                            .then((res: any) => {
+                                if (res) {
+                                    // sync all react state with the new defaults
+                                    setCurrentPreset(res.preset || "dotgrid");
+                                    presetState.SetState(res.preset || "dotgrid");
+                                    setIntensity(res.intensity ?? 1.0);
+                                    intensityState.SetState(res.intensity ?? 1.0);
+                                    setOpacity(res.opacity ?? 0.8);
+                                    opacityState.SetState(res.opacity ?? 0.8);
+                                    setInvertAxis(res.invert_axis ?? true);
+                                    invertAxisState.SetState(res.invert_axis ?? true);
+                                }
+                                toaster.toast({
+                                    title: "MuteMotion",
+                                    body: "Settings reset to defaults"
+                                });
+                            })
+                            .catch(() => {
+                                toaster.toast({
+                                    title: "MuteMotion",
+                                    body: "Reset failed"
+                                });
+                            });
+                    }}
+                >
+                    Reset to Defaults
+                </DialogButton>
             </PanelSectionRow>
 
             <PanelSectionRow>
@@ -216,20 +376,17 @@ const Content: VFC<{
                     }}
                 />
             </PanelSectionRow>
-            
+
             <PanelSectionRow>
                 <DialogButton onClick={() => {
-                    // mostly just making sure the bridge is alive
                     call("ping_engine", {})
                         .then((res: any) => {
-                            console.log("[MuteMotion] Ping success:", res);
                             toaster.toast({
                                 title: "MuteMotion Core",
                                 body: res?.message || "Engine is Online"
                             });
                         })
-                        .catch((err: any) => {
-                            console.error("[MuteMotion] Ping failed:", err);
+                        .catch(() => {
                             toaster.toast({
                                 title: "MuteMotion Core Error",
                                 body: "Engine is Offline (Safe Mode)"
@@ -252,19 +409,25 @@ export default definePlugin(() => {
     console.log('[MuteMotion] Initializing Core Injection...');
 
     // state nodes
-    const enabledState = new StateBoolean(false); 
-    const ballModeState = new StateBoolean(false);
+    const enabledState = new StateBoolean(false);
+    const presetState = new StateString("dotgrid");   // default preset
+    const intensityState = new StateNumber(0.5);       // default intensity
+    const opacityState = new StateNumber(0.8);         // default opacity
+    const invertAxisState = new StateBoolean(true);    // default inverted (apple style)
     const debugModeState = new StateBoolean(false);
 
     // Mount overlay function (incident 026b fix: routerhook re-registrations)
-    // we make this a standalone function so we can re-mount if it dies
     const mountOverlay = () => {
         if (routerHook) {
             console.log('[MuteMotion] RouterHook found, mounting ghost overlay...');
-            // remove before add just in case there's an orphan overlay
             routerHook.removeGlobalComponent("MuteMotionOverlay");
             routerHook.addGlobalComponent("MuteMotionOverlay", () => (
-                <Overlay enabledState={enabledState} ballModeState={ballModeState} debugModeState={debugModeState} />
+                <Overlay 
+                    enabledState={enabledState} 
+                    presetState={presetState} 
+                    debugModeState={debugModeState} 
+                    opacityState={opacityState} 
+                />
             ));
             return true;
         } else {
@@ -273,13 +436,32 @@ export default definePlugin(() => {
         }
     };
 
-    // Initial mount
     mountOverlay();
+
+    // hydrate state from sqlite on plugin init
+    call("get_settings", {}).then((res: any) => {
+        if (res) {
+            if (res.preset) presetState.SetState(res.preset);
+            if (res.intensity !== undefined) intensityState.SetState(res.intensity);
+            if (res.opacity !== undefined) opacityState.SetState(res.opacity);
+            if (res.invert_axis !== undefined) invertAxisState.SetState(res.invert_axis);
+            console.log('[MuteMotion] Settings hydrated from SQLite:', res);
+        }
+    }).catch((e: any) => {
+        console.error('[MuteMotion] Failed to hydrate settings:', e);
+    });
 
     return {
         name: "MuteMotion-Shim",
         title: <div className={staticClasses.Title}>MuteMotion</div>,
-        content: <Content enabledState={enabledState} ballModeState={ballModeState} debugModeState={debugModeState} />,
+        content: <Content
+            enabledState={enabledState}
+            presetState={presetState}
+            intensityState={intensityState}
+            opacityState={opacityState}
+            invertAxisState={invertAxisState}
+            debugModeState={debugModeState}
+        />,
         icon: <FaShip />,
         onDismount() {
             console.log('[MuteMotion] Plugin dismounting, dropping hooks...');

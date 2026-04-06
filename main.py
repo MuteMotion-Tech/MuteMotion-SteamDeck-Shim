@@ -26,6 +26,7 @@ import fcntl  # for hidraw ioctl (we tried ioctl FR it doesnt work but we keep t
 plugin_dir = decky_plugin.DECKY_PLUGIN_DIR
 py_modules_dir = os.path.join(plugin_dir, "py_modules")
 sys.path.append(py_modules_dir)
+sys.path.append(plugin_dir)  # settings_db.py lives at plugin root
 
 # load the brain (or die trying)
 try:
@@ -36,11 +37,22 @@ except Exception as e:
     decky_plugin.logger.error(f"Core failed to load (running in safe mode): {e}")
     core_engine = None  # we'll survive... barely
 
+# settings persistence — sqlite3 key-value store
+try:
+    from settings_db import SettingsDB
+    _settings_db = SettingsDB(os.path.join(plugin_dir, "mutemotion_settings.db"))
+    decky_plugin.logger.info("[SettingsDB] SQLite persistence layer loaded.")
+except Exception as e:
+    decky_plugin.logger.error(f"[SettingsDB] Failed to load (settings won't persist): {e}")
+    _settings_db = None
+
 
 class Plugin:
     def __init__(self):
         self._running = True
         self._reader_thread = None
+        self._overlay_crash_count = 0    # auto-restart limiter (max 3)
+        self._overlay_max_restarts = 3   # after this many crashes we stop trying
 
         # raw sensor values (after cursed axis swap — more on that below)
         self.gyro_x = 0.0
@@ -62,6 +74,22 @@ class Plugin:
         self.roll = 0.0
         self.last_imu_time = 0.0
 
+        # ui state (presets, calibration, intensity, opacity)
+        # load persisted settings from sqlite, fall back to defaults if db is unavailable
+        if _settings_db:
+            saved = _settings_db.get_all()
+            self._intensity = saved.get("intensity", 0.5)
+            self._opacity = saved.get("opacity", 0.8)
+            self._invert_axis = saved.get("invert_axis", True)
+            self._overlay_mode = saved.get("preset", "dotgrid")
+            decky_plugin.logger.info(f"[INIT] Loaded settings from SQLite: {saved}")
+        else:
+            self._intensity = 0.5
+            self._opacity = 0.8
+            self._invert_axis = True
+        self._pitch_offset = 0.0
+        self._roll_offset = 0.0
+
         # native overlay process (the gamescope bypass that actually works)
         self._overlay_process = None
         self._ipc_clients = []      # connected overlay renderers
@@ -78,29 +106,42 @@ class Plugin:
         # yes, we literally gaslight the steam client. it's called engineering.
         # ===================================================================
         decky_plugin.logger.info("Executing Configuration Override (Decoy Binding) Injection...")
-        try:
-            # lazy import — vdf_modifier lives next to us in the plugin dir
-            # gotta manually shove our dir into sys.path or python wont find it
-            plugin_base = os.path.dirname(os.path.abspath(__file__))
-            if plugin_base not in sys.path:
-                sys.path.insert(0, plugin_base)
-            import vdf_modifier
+        # retry loop — VDF injection can fail if Steam is mid-startup or filesystem is busy
+        # 3 attempts with 2s backoff. one failure shouldnt kill the whole bypass.
+        vdf_max_retries = 3
+        injections = False
+        for attempt in range(1, vdf_max_retries + 1):
+            try:
+                # lazy import — vdf_modifier lives next to us in the plugin dir
+                # gotta manually shove our dir into sys.path or python wont find it
+                plugin_base = os.path.dirname(os.path.abspath(__file__))
+                if plugin_base not in sys.path:
+                    sys.path.insert(0, plugin_base)
+                import vdf_modifier
 
-            # step 1: patch the VDF templates on disk (adds gyro_to_mouse group)
-            injections = vdf_modifier.apply_decoy_to_all()
+                # step 1: patch the VDF templates on disk (adds gyro_to_mouse group)
+                injections = vdf_modifier.apply_decoy_to_all()
 
-            # step 2: force steam to actually READ our patches
-            # (steam caches configs in memory and ignores disk changes. rude.)
-            app_id = vdf_modifier.get_running_app_id()
-            vdf_modifier.force_apply_gyro_profile(app_id)
+                # step 2: force steam to actually READ our patches
+                # (steam caches configs in memory and ignores disk changes. rude.)
+                app_id = vdf_modifier.get_running_app_id()
+                vdf_modifier.force_apply_gyro_profile(app_id)
 
-        except Exception as e:
-            decky_plugin.logger.error(f"VDF injection failed during import/exec: {e}")
-            injections = False
-        if injections:
-            decky_plugin.logger.info("Decoy bindings successfully applied.")
-        else:
-            decky_plugin.logger.warning("Failed to apply decoy bindings or no configs found.")
+                if injections:
+                    decky_plugin.logger.info(f"Decoy bindings applied on attempt {attempt}.")
+                    break  # success, stop retrying
+                else:
+                    decky_plugin.logger.warning(f"VDF attempt {attempt}/{vdf_max_retries}: no configs found, retrying...")
+
+            except Exception as e:
+                decky_plugin.logger.error(f"VDF attempt {attempt}/{vdf_max_retries} failed: {e}")
+                injections = False
+
+            if attempt < vdf_max_retries:
+                time.sleep(2)  # backoff before next attempt
+
+        if not injections:
+            decky_plugin.logger.warning("All VDF injection attempts exhausted. Bypass may not be active.")
 
     def _find_hidraw_devices(self):
         """scan /sys/class/hidraw/ for neptune controller endpoints (VID:28DE PID:1205)"""
@@ -284,6 +325,26 @@ class Plugin:
                     self._watchdog_fires += 1
                     decky_plugin.logger.info(f"[WATCHDOG] fire #{self._watchdog_fires}, re-scanning hidraw devices...")
 
+                    # ── GAME-LEVEL GYRO OVERRIDE DETECTION ──
+                    # if a game is running and its controller profile explicitly disables
+                    # gyro, our default template decoy gets overridden. detect this and
+                    # re-inject the decoy binding targeting the active game's AppID.
+                    # this handles community profiles like "Sleeping Dogs" that kill gyro.
+                    try:
+                        import vdf_modifier
+                        active_app = vdf_modifier.get_running_app_id()
+                        if active_app:
+                            decky_plugin.logger.info(
+                                f"[WATCHDOG] game AppId={active_app} detected during starvation, "
+                                f"re-injecting decoy binding..."
+                            )
+                            vdf_modifier.apply_decoy_to_all()
+                            vdf_modifier.force_apply_gyro_profile(active_app)
+                        else:
+                            decky_plugin.logger.info("[WATCHDOG] no game detected, skipping VDF re-injection")
+                    except Exception as e:
+                        decky_plugin.logger.error(f"[WATCHDOG] VDF re-injection failed: {e}")
+
                     # close all stale fds (they're ghosts now)
                     for fd in fds:
                         try:
@@ -333,19 +394,27 @@ class Plugin:
             # safe mode: error sentinel values (-99.9 = core is dead)
             return {
                 "offset": -99.9, "offset_x": 0, "offset_y": 0,
+                "invert_axis": getattr(self, "_invert_axis", True),
+                "intensity": getattr(self, "_intensity", 1.0),
+                "opacity": getattr(self, "_opacity", 0.8),
                 "rx": -99.9, "ry": -99.9, "rz": -99.9,
                 "ax": -99.9, "ay": -99.9, "az": -99.9
             }
 
         try:
             offset = getattr(self, 'last_offset', 0.0)
-            ox = float(self.roll) * -1.0  # invert roll for correct screen direction
-            oy = float(self.pitch)
+            intensity = getattr(self, "_intensity", 1.0)
+            # Raw differential offsets scaled by intensity
+            ox = (float(self.roll) - self._roll_offset) * intensity
+            oy = (float(self.pitch) - self._pitch_offset) * intensity
 
             return {
                 "offset": float(offset),
                 "offset_x": ox,
                 "offset_y": oy,
+                "invert_axis": getattr(self, "_invert_axis", True),
+                "intensity": getattr(self, "_intensity", 1.0),
+                "opacity": getattr(self, "_opacity", 0.8),
                 "rx": float(self.gyro_x),
                 "ry": float(self.gyro_y),
                 "rz": float(self.gyro_z),
@@ -358,6 +427,9 @@ class Plugin:
             # -88.8 = something broke mid-calculation (frontend shows error state)
             return {
                 "offset": -88.8, "offset_x": 0, "offset_y": 0,
+                "invert_axis": getattr(self, "_invert_axis", True),
+                "intensity": getattr(self, "_intensity", 1.0),
+                "opacity": getattr(self, "_opacity", 0.8),
                 "rx": -88.8, "ry": -88.8, "rz": -88.8,
                 "ax": -88.8, "ay": -88.8, "az": -88.8
             }
@@ -416,16 +488,40 @@ class Plugin:
         """blast IMU data to all connected overlay renderers via unix socket"""
         self._accept_ipc_clients()  # anyone new?
 
+        # auto-restart: if the overlay process died, bring it back
+        # (gamescope might have killed it, or it crashed, or cosmic rays)
+        # cap at _overlay_max_restarts to avoid infinite crash loops
+        if (self._overlay_process is not None
+                and self._overlay_process.poll() is not None
+                and self._overlay_crash_count < self._overlay_max_restarts):
+            self._overlay_crash_count += 1
+            exit_code = self._overlay_process.returncode
+            decky_plugin.logger.warning(
+                f"[OVERLAY] renderer died (exit={exit_code}), "
+                f"auto-restart {self._overlay_crash_count}/{self._overlay_max_restarts}"
+            )
+            self._overlay_process = None
+            # respawn in a fire-and-forget thread so we dont block the sensor loop
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self.start_native_overlay())
+            except Exception as e:
+                decky_plugin.logger.error(f"[OVERLAY] auto-restart failed: {e}")
+
         if not self._ipc_clients:
             return
 
         # build the JSON packet — euler angles + current overlay mode
-        ox = float(self.roll) * -1.0
-        oy = float(self.pitch)
+        ox = float(self.roll) - self._roll_offset
+        oy = float(self.pitch) - self._pitch_offset
         data = json.dumps({
             "offset_x": ox,
             "offset_y": oy,
             "mode": self._overlay_mode,
+            "intensity": self._intensity,
+            "opacity": getattr(self, "_opacity", 0.8),
+            "invert_axis": self._invert_axis,
         }).encode() + b"\n"
         
         # broadcast to everyone, yeet the dead connections
@@ -497,14 +593,98 @@ class Plugin:
         return {"status": "stopped"}
     
     async def set_overlay_mode(self, *args, **kwargs):
-        """switch between bar and ball mode — user picks their vibe in the QAM"""
+        """switch between preset visualizations — user picks their vibe in the QAM"""
         if args:
             mode_input = args[0] if isinstance(args[0], str) else str(args[0])
         else:
-            mode_input = kwargs.get("mode", "bar")
+            mode_input = kwargs.get("mode", "dotgrid")
         self._overlay_mode = mode_input
+        if _settings_db:
+            _settings_db.set("preset", self._overlay_mode)
         decky_plugin.logger.info(f"[OVERLAY] mode set to: {self._overlay_mode}")
         return {"mode": self._overlay_mode}
+
+    async def calibrate_imu(self, *args, **kwargs):
+        """reset artificial horizon to current device angle"""
+        self._pitch_offset = float(self.pitch)
+        self._roll_offset = float(self.roll)
+        decky_plugin.logger.info(f"[CALIBRATE] new zero -> pitch={self._pitch_offset}, roll={self._roll_offset}")
+        return {"status": "calibrated"}
+
+    async def set_intensity(self, *args, **kwargs):
+        """change overlay motion intensity multiplier"""
+        if args and isinstance(args[0], dict):
+            val = args[0].get("intensity", 0.5)
+        elif args:
+            val = args[0]
+        else:
+            val = kwargs.get("intensity", 0.5)
+        self._intensity = float(val)
+        if _settings_db:
+            _settings_db.set("intensity", self._intensity)
+        decky_plugin.logger.info(f"[INTENSITY] set to {self._intensity}")
+        return {"intensity": self._intensity}
+
+    async def set_opacity(self, *args, **kwargs):
+        """change overlay visual opacity"""
+        if args and isinstance(args[0], dict):
+            val = args[0].get("opacity", 0.8)
+        elif args:
+            val = args[0]
+        else:
+            val = kwargs.get("opacity", 0.8)
+        self._opacity = float(val)
+        if _settings_db:
+            _settings_db.set("opacity", self._opacity)
+        decky_plugin.logger.info(f"[OPACITY] set to {self._opacity}")
+        return {"opacity": self._opacity}
+
+    async def set_invert_axis(self, *args, **kwargs):
+        """toggle whether motion cues simulate opposite-inertia or direct-tracking"""
+        if args and isinstance(args[0], dict):
+            val = args[0].get("invert_axis", True)
+        elif args:
+            val = args[0]
+        else:
+            val = kwargs.get("invert_axis", True)
+        self._invert_axis = bool(val)
+        if _settings_db:
+            _settings_db.set("invert_axis", self._invert_axis)
+        decky_plugin.logger.info(f"[INVERT AXIS] set to {self._invert_axis}")
+        return {"invert_axis": self._invert_axis}
+
+    async def get_settings(self, *args, **kwargs):
+        """return all current persisted settings for frontend hydration"""
+        if _settings_db:
+            settings = _settings_db.get_all()
+        else:
+            settings = {
+                "preset": self._overlay_mode,
+                "intensity": self._intensity,
+                "opacity": self._opacity,
+                "invert_axis": self._invert_axis,
+            }
+        decky_plugin.logger.info(f"[SETTINGS] get_settings -> {settings}")
+        return settings
+
+    async def reset_settings(self, *args, **kwargs):
+        """reset all settings to factory defaults — the nuclear option"""
+        if _settings_db:
+            defaults = _settings_db.reset_all()
+        else:
+            defaults = {
+                "preset": "dotgrid",
+                "intensity": 0.5,
+                "opacity": 0.8,
+                "invert_axis": True,
+            }
+        # apply defaults to instance state
+        self._overlay_mode = defaults["preset"]
+        self._intensity = defaults["intensity"]
+        self._opacity = defaults["opacity"]
+        self._invert_axis = defaults["invert_axis"]
+        decky_plugin.logger.info(f"[SETTINGS] Reset to defaults: {defaults}")
+        return defaults
 
     async def _main(self):
         """plugin startup — load everything and send the sensor thread to war"""
@@ -521,6 +701,11 @@ class Plugin:
     async def _unload(self):
         """plugin shutdown — clean up everything. leave no traces. professional."""
         self._running = False
+        # wait for the reader thread to finish (3s timeout — it checks _running in its loop)
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=3)
+            if self._reader_thread.is_alive():
+                decky_plugin.logger.warning("[UNLOAD] reader thread didn't stop in 3s, abandoning")
         # kill the overlay subprocess
         await self.stop_native_overlay()
         # close all IPC connections
@@ -535,4 +720,7 @@ class Plugin:
                 os.unlink("/tmp/mutemotion.sock")
             except:
                 pass
-        decky_plugin.logger.info("MuteMotion Shim dismounted. see u next boot. gg wp. 🫡")
+        # close the settings database
+        if _settings_db:
+            _settings_db.close()
+        decky_plugin.logger.info("MuteMotion Shim dismounted. see u next boot. gg wp.")

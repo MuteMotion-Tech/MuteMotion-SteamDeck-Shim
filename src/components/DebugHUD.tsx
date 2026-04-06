@@ -56,6 +56,10 @@ export const DebugHUD: VFC = () => {
             <div>Gyro X:  {telemetry.rx.toFixed(2)} dps</div>
             <div>Gyro Y:  {telemetry.ry.toFixed(2)} dps</div>
             <div>Gyro Z:  {telemetry.rz.toFixed(2)} dps</div>
+            <div style={{ marginTop: "8px", borderTop: "1px solid #00ff00", paddingTop: "5px", fontWeight: "bold" }}>SETTINGS STATE</div>
+            <div>Intensity:  {telemetry.intensity !== undefined ? telemetry.intensity.toFixed(2) : "N/A"}</div>
+            <div>Invert:     {telemetry.invert_axis !== undefined ? String(telemetry.invert_axis) : "N/A"}</div>
+            <div>Opacity:    {telemetry.opacity !== undefined ? telemetry.opacity.toFixed(2) : "N/A"}</div>
         </div>
     );
 };

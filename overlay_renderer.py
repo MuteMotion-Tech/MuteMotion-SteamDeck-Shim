@@ -42,8 +42,15 @@ class NativeOverlay:
         # imu state
         self.offset_x = 0.0
         self.offset_y = 0.0
-        self.mode = "bar"  # "bar", "ball"
+        self.mode = "dotgrid"  # default
+        self.intensity = 1.0
         self.tick = 0
+        
+        # ipc reconnect backoff (exponential: 1s → 2s → 4s → 8s → cap 10s)
+        self._ipc_backoff = 1.0
+        self._ipc_max_backoff = 10.0
+        self._ipc_last_attempt = 0.0
+        self._last_ipc_data_time = 0.0  # for idle detection
         
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -116,10 +123,11 @@ class NativeOverlay:
         self.window.map()
         self.display.flush()
     
-    def _hex_to_rgb(self, hex_val):
+    def _hex_to_rgb(self, hex_val, alpha=1.0):
         """In 32-bit ARGB, format is AARRGGBB"""
         # For full opacity, alpha channel must be 0xFF
-        return 0xFF000000 | hex_val
+        a_int = max(0, min(255, int(255 * alpha)))
+        return (a_int << 24) | (hex_val & 0xFFFFFF)
 
     def draw_test_rectangle(self):
         """phase 1 validation animation"""
@@ -149,26 +157,27 @@ class NativeOverlay:
         self.window.fill_arc(self.gc, dot_x - 15, dot_y - 15, 30, 30, 0, 360 * 64)
         self.display.flush()
     
-    def draw_imu_bar(self, offset_x, offset_y):
+    def draw_imu_bar(self, offset_x, offset_y, intensity=1.0, opacity=0.8, invert_axis=True):
         """draw the horizon bar using live IMU data"""
         sw = self.screen.width_in_pixels
         sh = self.screen.height_in_pixels
         
         self.window.clear_area(0, 0, sw, sh)
         
-        # Red line
+        # Cyan line
         self.gc.change(
-            foreground=self._hex_to_rgb(0xFF0044),
+            foreground=self._hex_to_rgb(0x00FFCC),
             line_width=4
         )
         bar_w = int(sw * 0.9)
-        # pitch (offset_y in degrees): 1 degree = 6 pixels of vertical movement
-        bar_y = sh // 2 + int(offset_y * 6.0)
+        # pitch (offset_y in degrees): 1 degree = 6 pixels of vertical movement * intensity
+        bar_y = sh // 2 + int(offset_y * 6.0 * intensity)
         
         cx = sw // 2
         cy = bar_y
-        # roll (offset_x in degrees): convert exactly to radians for trigonometric line drawing
-        angle_rad = math.radians(offset_x)
+        # roll (offset_x in degrees): scale by intensity, limited rotation still
+        scaled_roll = max(-45, min(45, offset_x * 1.5 * intensity))
+        angle_rad = math.radians(scaled_roll)
         half_w = bar_w // 2
         
         x1 = int(cx - half_w * math.cos(angle_rad))
@@ -179,7 +188,7 @@ class NativeOverlay:
         self.window.line(self.gc, x1, y1, x2, y2)
         self.display.flush()
     
-    def draw_imu_ball(self, offset_x, offset_y):
+    def draw_imu_ball(self, offset_x, offset_y, intensity=1.0, opacity=0.8, invert_axis=True):
         """draw the tracking ball using live IMU data"""
         sw = self.screen.width_in_pixels
         sh = self.screen.height_in_pixels
@@ -191,23 +200,120 @@ class NativeOverlay:
         self.window.line(self.gc, sw//2 - 10, sh//2, sw//2 + 10, sh//2)
         self.window.line(self.gc, sw//2, sh//2 - 10, sw//2, sh//2 + 10)
         
-        # Green ball
-        # offset_x/y are degrees. 45 degrees should map to edge of screen (roughly 600px / 400px)
-        bx = int(sw // 2 + max(-600, min(600, offset_x * 12.0)))
-        by = int(sh // 2 + max(-400, min(400, offset_y * 8.0)))
+        # Green ball - clamped to 30px travel
+        invert_mult = -1.0 if invert_axis else 1.0
+        bx = int(sw // 2 + max(-30, min(30, offset_x * 12.0 * intensity * invert_mult)))
+        by = int(sh // 2 + max(-30, min(30, offset_y * 12.0 * intensity * invert_mult)))
+        self.gc.change(foreground=self._hex_to_rgb(0x00FFCC))
         self.window.fill_arc(self.gc, bx - 15, by - 15, 30, 30, 0, 360 * 64)
         
+        self.display.flush()
+
+    def draw_imu_dotgrid(self, offset_x, offset_y, intensity=1.0, opacity=0.8, invert_axis=True):
+        """draw the edge-based dot cues (Apple Car Motion Cues style - vertical edges only)"""
+        sw = self.screen.width_in_pixels
+        sh = self.screen.height_in_pixels
+        self.window.clear_area(0, 0, sw, sh)
+        
+        # Dots move OPPOSITE to tilt to simulate inertia if invert_axis is True
+        max_travel = 30.0
+        invert_mult = -1.0 if invert_axis else 1.0
+        shift_x = max(-max_travel, min(max_travel, offset_x * 12.0 * intensity * invert_mult))
+        shift_y = max(-max_travel, min(max_travel, offset_y * 12.0 * intensity * invert_mult))
+        
+        # Use cyan dots as per request
+        self.gc.change(foreground=self._hex_to_rgb(0x00FFCC, alpha=opacity))
+        dot_r = 4  # Slightly smaller dots
+        margin = 60 # Distance from screen edge
+        
+        # 4 dots per side, distributed from 25% to 75% height
+        dot_count = 4
+        
+        for i in range(dot_count):
+            pct = 0.25 + (i * 0.5) / (dot_count - 1)
+            y_base = int(sh * pct)
+            
+            # Apply IMU shift
+            x_left = margin + int(shift_x)
+            x_right = sw - margin - int(shift_x) # Opposite side mirrored correctly in horizontal layout? Actually we just shift them parallel.
+            y_pos = y_base + int(shift_y)
+            
+            # Left edge dot
+            self.window.fill_arc(self.gc, x_left - dot_r, y_pos - dot_r, dot_r*2, dot_r*2, 0, 360*64)
+            # Right edge dot
+            self.window.fill_arc(self.gc, sw - margin - int(shift_x) - dot_r, y_pos - dot_r, dot_r*2, dot_r*2, 0, 360*64)
+
+        self.display.flush()
+
+    def draw_imu_crosshair(self, offset_x, offset_y, intensity=1.0, opacity=0.8, invert_axis=True):
+        """draw the minimal drifting crosshair"""
+        sw = self.screen.width_in_pixels
+        sh = self.screen.height_in_pixels
+        
+        self.window.clear_area(0, 0, sw, sh)
+        
+        # Crosshair center moves slightly with IMU - clamped to 30px
+        invert_mult = -1.0 if invert_axis else 1.0
+        cx = int(sw // 2 + max(-30, min(30, offset_x * 10.0 * intensity * invert_mult)))
+        cy = int(sh // 2 + max(-30, min(30, offset_y * 7.0 * intensity * invert_mult)))
+        
+        self.gc.change(foreground=self._hex_to_rgb(0x88FFFFFF, alpha=opacity), line_width=2)
+        arm = 20
+        gap = 6
+        
+        # 4 arms
+        self.window.line(self.gc, cx, cy - gap - arm, cx, cy - gap)
+        self.window.line(self.gc, cx, cy + gap, cx, cy + gap + arm)
+        self.window.line(self.gc, cx - gap - arm, cy, cx - gap, cy)
+        self.window.line(self.gc, cx + gap, cy, cx + gap + arm, cy)
+        
+        # tiny center dot
+        self.gc.change(foreground=self._hex_to_rgb(0x00FFCC, alpha=opacity))
+        self.window.fill_arc(self.gc, cx - 2, cy - 2, 4, 4, 0, 360 * 64)
+        
+        self.display.flush()
+    
+    def draw_idle_indicator(self):
+        """pulsing dot — overlay is alive but waiting for IPC data"""
+        sw = self.screen.width_in_pixels
+        sh = self.screen.height_in_pixels
+        
+        self.window.clear_area(0, 0, sw, sh)
+        
+        # pulsing cyan dot in bottom-right corner (non-intrusive)
+        # opacity pulses via size: 6px → 12px → 6px over ~2s
+        pulse = abs(math.sin(self.tick / 60.0))
+        radius = int(6 + pulse * 6)
+        
+        self.gc.change(foreground=self._hex_to_rgb(0x00CCAA))
+        dot_x = sw - 40
+        dot_y = sh - 40
+        self.window.fill_arc(
+            self.gc, dot_x - radius, dot_y - radius,
+            radius * 2, radius * 2, 0, 360 * 64
+        )
         self.display.flush()
     
     def connect_ipc(self):
         """connect to the python backend's unix socket for live data"""
+        now = time.time()
+        # enforce backoff — dont spam reconnect attempts
+        if now - self._ipc_last_attempt < self._ipc_backoff:
+            return None
+        self._ipc_last_attempt = now
+        
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.setblocking(False)
         try:
             sock.connect(SOCK_PATH)
             print(f"[OVERLAY] connected to IPC socket {SOCK_PATH}")
+            # reset backoff on success
+            self._ipc_backoff = 1.0
+            self._last_ipc_data_time = time.time()
             return sock
         except (ConnectionRefusedError, FileNotFoundError):
+            # increase backoff: 1s → 2s → 4s → 8s → cap 10s
+            self._ipc_backoff = min(self._ipc_backoff * 2, self._ipc_max_backoff)
             return None
     
     def run(self):
@@ -215,6 +321,8 @@ class NativeOverlay:
         ipc_sock = self.connect_ipc()
         ipc_buffer = b""
         frame_time = 1.0 / TARGET_FPS
+        x_reconnect_attempts = 0
+        max_x_reconnects = 5
         
         print(f"[OVERLAY] entering render loop at {TARGET_FPS}fps")
         
@@ -234,6 +342,10 @@ class NativeOverlay:
                                 self.offset_x = data.get("offset_x", 0)
                                 self.offset_y = data.get("offset_y", 0)
                                 self.mode = data.get("mode", self.mode)
+                                self.intensity = data.get("intensity", self.intensity)
+                                self.opacity = data.get("opacity", getattr(self, "opacity", 0.8))
+                                self.invert_axis = data.get("invert_axis", getattr(self, "invert_axis", True))
+                                self._last_ipc_data_time = time.time()
                             except json.JSONDecodeError:
                                 pass
                     elif chunk == b"":
@@ -244,17 +356,53 @@ class NativeOverlay:
                     ipc_sock = self.connect_ipc()
                     ipc_buffer = b""
             else:
-                if self.tick % (TARGET_FPS * 2) == 0:
-                    ipc_sock = self.connect_ipc()
+                # no connection — try reconnect (backoff handled inside connect_ipc)
+                ipc_sock = self.connect_ipc()
             
-            # draw next frame
-            if ipc_sock and (self.offset_x != 0 or self.offset_y != 0):
-                if self.mode == "ball":
-                    self.draw_imu_ball(self.offset_x, self.offset_y)
+            # draw next frame — wrapped in try/except for X display disconnect
+            try:
+                self.tick += 1
+                ipc_data_age = time.time() - self._last_ipc_data_time if self._last_ipc_data_time > 0 else 999
+                
+                if ipc_sock and ipc_data_age < 2.0 and (self.offset_x != 0 or self.offset_y != 0):
+                    # live IMU data flowing — render the real overlay
+                    if self.mode == "dot" or self.mode == "ball":
+                        self.draw_imu_ball(self.offset_x, self.offset_y, self.intensity, getattr(self, "opacity", 0.8), getattr(self, "invert_axis", True))
+                    elif self.mode == "horizon" or self.mode == "bar":
+                        self.draw_imu_bar(self.offset_x, self.offset_y, self.intensity, getattr(self, "opacity", 0.8), getattr(self, "invert_axis", True))
+                    elif self.mode == "dotgrid":
+                        self.draw_imu_dotgrid(self.offset_x, self.offset_y, self.intensity, getattr(self, "opacity", 0.8), getattr(self, "invert_axis", True))
+                    elif self.mode == "crosshair":
+                        self.draw_imu_crosshair(self.offset_x, self.offset_y, self.intensity, getattr(self, "opacity", 0.8), getattr(self, "invert_axis", True))
+                    else:
+                        self.draw_imu_dotgrid(self.offset_x, self.offset_y, self.intensity, getattr(self, "opacity", 0.8), getattr(self, "invert_axis", True))
+                elif ipc_sock or self._last_ipc_data_time > 0:
+                    # connected but no fresh data — show idle indicator
+                    self.draw_idle_indicator()
                 else:
-                    self.draw_imu_bar(self.offset_x, self.offset_y)
-            else:
-                self.draw_test_rectangle()
+                    # no IPC connection at all — show test animation
+                    self.draw_test_rectangle()
+                
+                # reset X reconnect counter on successful frame
+                x_reconnect_attempts = 0
+                
+            except Exception as e:
+                # X display connection lost (gamescope restart, display change, etc)
+                x_reconnect_attempts += 1
+                print(f"[OVERLAY] X display error ({x_reconnect_attempts}/{max_x_reconnects}): {e}")
+                
+                if x_reconnect_attempts >= max_x_reconnects:
+                    print("[OVERLAY] FATAL: max X reconnect attempts reached, exiting")
+                    self.running = False
+                    break
+                
+                # wait and try to recreate the window
+                time.sleep(2)
+                try:
+                    self.create_window()
+                    print("[OVERLAY] X display reconnected successfully")
+                except Exception as re_err:
+                    print(f"[OVERLAY] X reconnect failed: {re_err}")
             
             # frame pacing
             elapsed = time.time() - t_start

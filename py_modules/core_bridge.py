@@ -3,7 +3,7 @@ import os
 import sys
 import math
 
-# match the C struct from mutemotion_core.h
+
 # xyz doubles bc the kernel constants already got divided out before we get here
 class SensorData(ctypes.Structure):
     _fields_ = [
@@ -60,8 +60,13 @@ class MuteMotionCore:
     def set_sensitivity(self, sensitivity):
         """restart the engine with new sensitivity (theres no setter in C rn)"""
         if self.instance:
-            self.lib.cleanup_core(self.instance)
-        self.instance = self.lib.init_core(float(sensitivity))
+            # try to create new instance first — if it fails, keep the old one
+            new_instance = self.lib.init_core(float(sensitivity))
+            if new_instance:
+                self.lib.cleanup_core(self.instance)
+                self.instance = new_instance
+            else:
+                print("[CoreBridge] WARNING: init_core returned NULL (OOM?), keeping old instance")
 
     def process(self, gyro_tuple, accel_tuple, dt=0.004):
         """
