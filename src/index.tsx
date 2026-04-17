@@ -11,7 +11,7 @@ import {
     DialogButton,
     staticClasses,
 } from "@decky/ui";
-import { FaShip } from "react-icons/fa";
+
 import React, { VFC, useState, useEffect } from "react";
 import { routerHook, toaster } from "@decky/api";
 
@@ -46,12 +46,12 @@ const PresetComponent: Record<PresetMode, VFC> = {
 const Overlay: VFC<{
     enabledState: StateBoolean,
     presetState: StateString,
-    debugModeState: StateBoolean,
+    sensorOverlayState: StateBoolean,
     opacityState: StateNumber
-}> = React.memo(({ enabledState, presetState, debugModeState, opacityState }) => {
+}> = React.memo(({ enabledState, presetState, sensorOverlayState, opacityState }) => {
     const [visible, setVisible] = useState(enabledState.GetState());
     const [preset, setPreset] = useState(presetState.GetState());
-    const [useDebug, setUseDebug] = useState(debugModeState.GetState());
+    const [useDebug, setUseDebug] = useState(sensorOverlayState.GetState());
 
     // "ghost mode" - use notification layer because the footer kept stealing my inputs
     useUIComposition(visible || useDebug ? UIComposition.Notification : UIComposition.Hidden);
@@ -63,14 +63,14 @@ const Overlay: VFC<{
 
         enabledState.onStateChanged(onEnabledChange);
         presetState.onStateChanged(onPresetChange);
-        debugModeState.onStateChanged(onDebugChange);
+        sensorOverlayState.onStateChanged(onDebugChange);
 
         return () => {
             enabledState.offStateChanged(onEnabledChange);
             presetState.offStateChanged(onPresetChange);
-            debugModeState.offStateChanged(onDebugChange);
+            sensorOverlayState.offStateChanged(onDebugChange);
         };
-    }, [enabledState, presetState, debugModeState]);
+    }, [enabledState, presetState, sensorOverlayState]);
 
     // input isolation voodoo (click-through hack)
     useEffect(() => {
@@ -173,14 +173,16 @@ const Content: VFC<{
     intensityState: StateNumber,
     opacityState: StateNumber,
     invertAxisState: StateBoolean,
-    debugModeState: StateBoolean
-}> = React.memo(({ enabledState, presetState, intensityState, opacityState, invertAxisState, debugModeState }) => {
+    debugModeState: StateBoolean,
+    sensorOverlayState: StateBoolean
+}> = React.memo(({ enabledState, presetState, intensityState, opacityState, invertAxisState, debugModeState, sensorOverlayState }) => {
     const [isEnabled, setIsEnabled] = useState(enabledState.GetState());
     const [currentPreset, setCurrentPreset] = useState(presetState.GetState());
     const [intensity, setIntensity] = useState(intensityState.GetState());
     const [opacity, setOpacity] = useState(opacityState.GetState());
     const [invertAxis, setInvertAxis] = useState(invertAxisState.GetState());
-    const [isDebug, setIsDebug] = useState(debugModeState.GetState());
+    const [isDevMode, setIsDevMode] = useState(debugModeState.GetState());
+    const [isSensorOverlay, setIsSensorOverlay] = useState(sensorOverlayState.GetState());
 
     useEffect(() => {
         const eHandler = (val: boolean) => setIsEnabled(val);
@@ -188,7 +190,8 @@ const Content: VFC<{
         const iHandler = (val: number) => setIntensity(val);
         const opHandler = (val: number) => setOpacity(val);
         const invHandler = (val: boolean) => setInvertAxis(val);
-        const dHandler = (val: boolean) => setIsDebug(val);
+        const dHandler = (val: boolean) => setIsDevMode(val);
+        const sHandler = (val: boolean) => setIsSensorOverlay(val);
 
         enabledState.onStateChanged(eHandler);
         presetState.onStateChanged(pHandler);
@@ -196,6 +199,7 @@ const Content: VFC<{
         opacityState.onStateChanged(opHandler);
         invertAxisState.onStateChanged(invHandler);
         debugModeState.onStateChanged(dHandler);
+        sensorOverlayState.onStateChanged(sHandler);
 
         return () => {
             enabledState.offStateChanged(eHandler);
@@ -204,16 +208,17 @@ const Content: VFC<{
             opacityState.offStateChanged(opHandler);
             invertAxisState.offStateChanged(invHandler);
             debugModeState.offStateChanged(dHandler);
+            sensorOverlayState.offStateChanged(sHandler);
         };
-    }, [enabledState, presetState, intensityState, opacityState, invertAxisState, debugModeState]);
+    }, [enabledState, presetState, intensityState, opacityState, invertAxisState, debugModeState, sensorOverlayState]);
 
     return (
         <>
-        <PanelSection title="Mitigation Engine">
+        <PanelSection title="MuteMotion Settings">
             <PanelSectionRow>
                 <ToggleField
-                    label="Active Mitigation"
-                    description="Spawn native overlay (GAMESCOPE_EXTERNAL_OVERLAY)"
+                    label="Enable MuteMotion"
+                    description="Activates the anti-sickness visualizer"
                     checked={isEnabled}
                     onChange={(val) => {
                         setIsEnabled(val);
@@ -223,7 +228,7 @@ const Content: VFC<{
                             // so the user's current position becomes the new neutral
                             call("calibrate_imu", {}).then(() => {
                                 call("start_native_overlay", {}).then((res: any) => {
-                                    toaster.toast({ title: "MuteMotion", body: res?.message || "Overlay Started — Calibrated" });
+                                    toaster.toast({ title: "MuteMotion", body: "Overlay Active" });
                                 }).catch(() => {
                                     toaster.toast({ title: "MuteMotion", body: "Failed to start overlay" });
                                 });
@@ -239,8 +244,8 @@ const Content: VFC<{
 
             <PanelSectionRow>
                 <DropdownItem
-                    label="Overlay Preset"
-                    description="Choose visualization style"
+                    label="Visual Style"
+                    description="Choose the shape of the motion anchor"
                     rgOptions={PRESET_OPTIONS.map((opt, idx) => ({
                         label: opt.label,
                         data: opt.data,
@@ -257,8 +262,8 @@ const Content: VFC<{
 
             <PanelSectionRow>
                 <SliderField
-                    label="Intensity"
-                    description="How strongly the overlay reacts to motion"
+                    label="Motion Intensity"
+                    description="How strongly the visual reacts to movement"
                     value={Math.round(intensity * 100)}
                     min={0}
                     max={200}
@@ -365,41 +370,60 @@ const Content: VFC<{
                 </DialogButton>
             </PanelSectionRow>
 
+        </PanelSection>
+
+        <PanelSection title="Developer Mode">
             <PanelSectionRow>
                 <ToggleField
-                    label="Debug Monitor"
-                    description="Overlay RAW sensor data directly on screen"
-                    checked={isDebug}
+                    label="Developer Mode"
+                    description="Show advanced diagnostics and raw data"
+                    checked={isDevMode}
                     onChange={(val) => {
-                        setIsDebug(val);
+                        setIsDevMode(val);
                         debugModeState.SetState(val);
                     }}
                 />
             </PanelSectionRow>
 
-            <PanelSectionRow>
-                <DialogButton onClick={() => {
-                    call("ping_engine", {})
-                        .then((res: any) => {
-                            toaster.toast({
-                                title: "MuteMotion Core",
-                                body: res?.message || "Engine is Online"
-                            });
-                        })
-                        .catch(() => {
-                            toaster.toast({
-                                title: "MuteMotion Core Error",
-                                body: "Engine is Offline (Safe Mode)"
-                            });
-                        });
-                }}>
-                    Test Engine Ping
-                </DialogButton>
-            </PanelSectionRow>
-        </PanelSection>
+            {isDevMode && (
+                <>
+                    <PanelSectionRow>
+                        <ToggleField
+                            label="Raw Sensor Overlay"
+                            description="Display live IMU data on screen"
+                            checked={isSensorOverlay}
+                            onChange={(val) => {
+                                setIsSensorOverlay(val);
+                                sensorOverlayState.SetState(val);
+                            }}
+                        />
+                    </PanelSectionRow>
 
-        <PanelSection title="Sensor Thread Diagnostics">
-            <WatchdogStatus />
+                    <PanelSectionRow>
+                        <DialogButton onClick={() => {
+                            call("ping_engine", {})
+                                .then((res: any) => {
+                                    toaster.toast({
+                                        title: "MuteMotion Core",
+                                        body: res?.message || "Engine is Online"
+                                    });
+                                })
+                                .catch(() => {
+                                    toaster.toast({
+                                        title: "MuteMotion Core Error",
+                                        body: "Engine is Offline (Safe Mode)"
+                                    });
+                                });
+                        }}>
+                            Test Core Engine Connection
+                        </DialogButton>
+                    </PanelSectionRow>
+
+                    <PanelSection title="Sensor Thread Diagnostics">
+                        <WatchdogStatus />
+                    </PanelSection>
+                </>
+            )}
         </PanelSection>
         </>
     );
@@ -415,6 +439,7 @@ export default definePlugin(() => {
     const opacityState = new StateNumber(0.8);         // default opacity
     const invertAxisState = new StateBoolean(true);    // default inverted (apple style)
     const debugModeState = new StateBoolean(false);
+    const sensorOverlayState = new StateBoolean(false);
 
     // Mount overlay function (incident 026b fix: routerhook re-registrations)
     const mountOverlay = () => {
@@ -425,7 +450,7 @@ export default definePlugin(() => {
                 <Overlay 
                     enabledState={enabledState} 
                     presetState={presetState} 
-                    debugModeState={debugModeState} 
+                    sensorOverlayState={sensorOverlayState} 
                     opacityState={opacityState} 
                 />
             ));
@@ -452,7 +477,7 @@ export default definePlugin(() => {
     });
 
     return {
-        name: "MuteMotion-Shim",
+        name: "MuteMotion SteamDeck",
         title: <div className={staticClasses.Title}>MuteMotion</div>,
         content: <Content
             enabledState={enabledState}
@@ -461,8 +486,11 @@ export default definePlugin(() => {
             opacityState={opacityState}
             invertAxisState={invertAxisState}
             debugModeState={debugModeState}
+            sensorOverlayState={sensorOverlayState}
         />,
-        icon: <FaShip />,
+        icon: <svg viewBox="0 0 24 24" width="1em" height="1em" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 20V4h3l6 8 6-8h3v16h-4V10l-5 6.5L7 10v10z" fill="#00ffcc" />
+        </svg>,
         onDismount() {
             console.log('[MuteMotion] Plugin dismounting, dropping hooks...');
             if (routerHook) {

@@ -125,7 +125,7 @@ export const HorizonBar: VFC = () => {
                 ctx.save();
                 ctx.rotate((hist.r * Math.PI) / 180);
                 ctx.translate(0, hist.p);
-                ctx.fillStyle = `rgba(255, 0, 68, ${tAlpha})`;
+                ctx.fillStyle = `rgba(0, 255, 204, ${tAlpha})`;
                 ctx.beginPath();
                 ctx.roundRect(-tWidth / 2, -barHeight / 2, tWidth, barHeight, radius);
                 ctx.fill();
@@ -136,8 +136,8 @@ export const HorizonBar: VFC = () => {
             ctx.rotate((s.posRoll * Math.PI) / 180);
             ctx.translate(0, s.posPitch);
 
-            ctx.fillStyle = `rgba(255, 0, 68, ${baseAlpha})`;
-            ctx.shadowColor = `rgba(255, 0, 68, ${baseAlpha * 0.5})`;
+            ctx.fillStyle = `rgba(0, 255, 204, ${baseAlpha})`;
+            ctx.shadowColor = `rgba(0, 255, 204, ${baseAlpha * 0.5})`;
             ctx.shadowBlur = 20;
 
             // draw rounded rectangle
