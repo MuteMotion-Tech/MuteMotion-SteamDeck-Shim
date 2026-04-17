@@ -381,6 +381,10 @@ const Content: VFC<{
                     onChange={(val) => {
                         setIsDevMode(val);
                         debugModeState.SetState(val);
+                        if (!val) {
+                            setIsSensorOverlay(false);
+                            sensorOverlayState.SetState(false);
+                        }
                     }}
                 />
             </PanelSectionRow>

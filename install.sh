@@ -38,8 +38,9 @@ tar -xzf mutemotion.tar.gz
 echo -e "${CYAN}We need root access to move the plugin into Decky Loader's directory.${NC}"
 echo "Please enter your sudo password if prompted:"
 
-# Remove old version if it exists
+# Remove old versions if they exist
 sudo rm -rf "$PLUGIN_DIR"
+sudo rm -rf "$HOME/homebrew/plugins/MuteMotion-Shim"
 
 # Move the extracted folder to plugins
 sudo mv "$PLUGIN_NAME" "$HOME/homebrew/plugins/"
