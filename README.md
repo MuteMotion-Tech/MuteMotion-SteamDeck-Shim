@@ -7,7 +7,7 @@ This module bridges hardware IMU data with the proprietary **MuteMotion Core Eng
 
 * **Target:** Valve Steam Deck (SteamOS)
 * **Status:** Academic Proof-of-Concept
-* **Lead Implementation:** Adriano Neto (a22307762@alunos.ulht.pt)
+* **Lead Implementation:** a22307762@alunos.ulht.pt
 
 ## Licensing
 * **Shim Layer:** MIT License (Open Source)
