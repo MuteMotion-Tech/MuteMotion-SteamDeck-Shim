@@ -87,6 +87,7 @@ class Plugin:
             self._intensity = 0.5
             self._opacity = 0.8
             self._invert_axis = True
+            self._overlay_mode = "dotgrid"
         self._pitch_offset = 0.0
         self._roll_offset = 0.0
 
@@ -94,7 +95,6 @@ class Plugin:
         self._overlay_process = None
         self._ipc_clients = []      # connected overlay renderers
         self._ipc_server_sock = None
-        self._overlay_mode = "bar"  # "bar" or "ball" — user picks in QAM
 
         # ===================================================================
         # VDF CONFIGURATION OVERRIDE — the "Decoy Binding" strategy
@@ -315,6 +315,9 @@ class Plugin:
                         if core_engine:
                             gyro_tup = (self.gyro_x, self.gyro_y, self.gyro_z)
                             accel_tup = (self.accel_x, self.accel_y, self.accel_z)
+                            self.last_offset = core_engine.process(gyro_tup, accel_tup, dt)
+                        else:
+                            # safe mode fallback: raw euler sum (no EMA smoothing)
                             self.last_offset = self.roll + self.pitch
 
                         # yeet IMU data to the native overlay via unix socket
