@@ -3,7 +3,7 @@
 Official implementation of the **MuteMotion Project** validation layer. This repository serves as the technical deliverable for academic auditing at **Universidade Lusófona do Porto**.
 
 ## Architecture
-This module bridges hardware IMU data with the proprietary **MuteMotion Core Engine**. It is designed as a platform-specific "Body" to ensure algorithm portability.
+This module bridges hardware IMU data with the **MuteMotion Core Engine**. It is designed as a platform-specific "Body" to ensure algorithm portability.
 
 * **Target:** Valve Steam Deck (SteamOS)
 * **Status:** Academic Proof-of-Concept
