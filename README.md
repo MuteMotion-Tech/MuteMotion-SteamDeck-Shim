@@ -1,4 +1,4 @@
-# MuteMotion-SteamOS-Shim
+# MuteMotion-SteamDeck-Shim
 
 Official implementation of the **MuteMotion Project** validation layer. This repository serves as the technical deliverable for academic auditing at **Universidade Lusófona do Porto**.
 
